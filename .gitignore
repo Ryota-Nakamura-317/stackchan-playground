@@ -1,0 +1,27 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# macOS
+.DS_Store
+
+# Secrets / Local config (public化のため徹底排除)
+**/secrets.h
+**/config.local.sh
+.claude/settings.local.json
+
+# AquesTalk バイナリ (再配布不可)
+experiments/*/firmware/lib/AquesTalkTTS/*
+!experiments/*/firmware/lib/AquesTalkTTS/.gitkeep
+!experiments/*/firmware/lib/AquesTalkTTS/README.md
+
+# Build artifacts
+*.bin
+*.elf
+*.map
