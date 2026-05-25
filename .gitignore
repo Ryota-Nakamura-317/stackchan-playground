@@ -14,7 +14,10 @@
 # Secrets / Local config (public化のため徹底排除)
 **/secrets.h
 **/config.local.sh
-.claude/settings.local.json
+
+# Claude 関連(ローカル管理のためコミット対象外)
+CLAUDE.md
+.claude/
 
 # AquesTalk バイナリ (再配布不可)
 experiments/*/firmware/lib/AquesTalkTTS/*
