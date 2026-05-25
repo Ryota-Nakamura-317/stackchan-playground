@@ -35,7 +35,7 @@ https://docs.m5stack.com/ja/StackChan
   - `m5stack/M5Unified`
   - `meganetaaan/stackchan-arduino`（Avatar、サーボ）
   - `bblanchon/ArduinoJson`
-  - `AquesTalkTTS-esp32`（オフライン日本語 TTS、個人利用無償、手動配置の可能性あり）
+  - `AquesTalk ESP32`（オフライン日本語 TTS、評価版無償・ナ行マ行が「ヌ」化する制限あり / 継続利用は有償ライセンスキー必須、手動配置）
 
 ## ビルド・書き込み・モニタコマンド
 

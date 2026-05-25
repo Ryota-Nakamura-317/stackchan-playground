@@ -41,10 +41,10 @@ experiments/
 - [Stack-chan 公式リポジトリ](https://github.com/stack-chan/stack-chan)
 - [meganetaaan/stackchan-arduino](https://github.com/meganetaaan/stack-chan-arduino)
 - [M5Unified](https://github.com/m5stack/M5Unified)
-- [AquesTalk pico for ESP32](https://www.a-quest.com/products/aquestalk_picoesp32.html)(個人利用無償、本リポジトリには同梱しません)
+- [AquesTalk ESP32](https://www.a-quest.com/products/aquestalk_esp32.html)(評価版は無償だがナ行・マ行が「ヌ」になる制限あり。継続利用・商用は有償ライセンスキーが必要。本リポジトリには同梱しません)
 
 ## ライセンス
 
 本リポジトリのソースコードは [MIT License](LICENSE) の下で公開しています。
 
-ただし、各実験で利用しているサードパーティライブラリ(M5Unified、stackchan-arduino、AquesTalk pico for ESP32 など)はそれぞれの提供元ライセンスに従ってください。とくに **AquesTalk pico for ESP32 のバイナリは再配布できない** ため、本リポジトリには含まれていません。各自で公式から入手してください(手順は実験ごとの README を参照)。
+ただし、各実験で利用しているサードパーティライブラリ(M5Unified、stackchan-arduino、AquesTalk ESP32 など)はそれぞれの提供元ライセンスに従ってください。とくに **AquesTalk ESP32 のバイナリは再配布できない** ため、本リポジトリには含まれていません。各自で公式から入手してください(手順は実験ごとの README を参照)。

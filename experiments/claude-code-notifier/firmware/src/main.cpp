@@ -1,15 +1,25 @@
 // Claude Code Notifier — Stack-chan side firmware
 //
-// HTTP POST /speak を受け取り、AquesTalk pico for ESP32 で発話するだけの最小サーバ。
-// payload 例: {"mode":"fixed","text":"マックノ クロードノ サギョウガ オワリマシタ."}
-//   - mode == "fixed" の場合: ファーム側固定の音素列を発話（text は無視）。
-//   - それ以外:              text フィールドをそのまま AquesTalk の音素列として再生。
+// HTTP POST /speak を受け取り、AquesTalk ESP32 で発話するだけの最小サーバ。
+// payload 例: {"mode":"fixed","text":"無視される"}
+//             {"mode":"free","text":"サギョウ シュウリョウ"}
+//   - mode == "fixed":     ファーム側に焼き込まれた固定文を発話(text は無視)
+//   - mode == "free" 他:   payload の text フィールドをそのまま発話
+//
+// AquesTalk ESP32 の API メモ:
+//   - TTS.createK("XXX-XXX-XXX", "/aq_dic")  漢字対応辞書つき初期化
+//   - TTS.create("XXX-XXX-XXX")              音素列のみ(辞書不要)初期化
+//   - TTS.playK("漢字仮名混じり文", speed)   漢字 → 音素変換 + 再生
+//   - TTS.play("オンソレツ", speed)           音素列を直接再生
+//   - 評価版だとナ行・マ行が「ヌ」になる制限あり。
+//     固定文を「サギョウ シュウリョウ」のようにマ・ナ行を含まない言葉にすると評価版でも崩れない。
 //
 // 注意:
-//   - AquesTalk の入力は「カタカナ + 記号」の音素表記。漢字仮名混じりは正しく発音されない。
-//   - 漢字→音素変換は ESP32 上では現実的でないため、Mac 側スクリプトでカタカナ列を渡す前提。
-//   - サーボピンは Stack-chan ボード（スイッチサイエンス 11129）の標準配線に合わせている。
-//     実機の配線に応じて SERVO_PIN_X / SERVO_PIN_Y を調整すること。
+//   - ラッパー AquesTalkTTS.h は AquesTalk ESP32 同梱の examples/hello_aquestalk_tts から
+//     firmware/lib/AquesTalkTTS/src/ にコピーする(詳細は firmware/lib/AquesTalkTTS/README.md)。
+//   - 漢字対応で動かしたい場合は SPIFFS / LittleFS に aq_dic を書き込んでパスを渡す。
+//     最小構成では音素列入力(createK ではなく create + playK の音素列モード)で十分。
+//   - サーボピンは実機の配線に応じて調整すること。
 
 #include <M5Unified.h>
 #include <Avatar.h>
@@ -24,10 +34,12 @@ using namespace m5avatar;
 
 namespace {
 
-constexpr int SERVO_PIN_X = 33;  // パン（左右）
-constexpr int SERVO_PIN_Y = 32;  // チルト（上下）
+constexpr int SERVO_PIN_X = 33;  // パン(左右)
+constexpr int SERVO_PIN_Y = 32;  // チルト(上下)
 
-constexpr char FIXED_PHONETIC[] = "マックノ クロードノ サギョウガ オワリマシタ.";
+// AquesTalk 評価版でも崩れないようナ行・マ行を含まない固定文。
+// 製品版ライセンスを購入したら好きな文に書き換えて OK。
+constexpr char FIXED_MESSAGE[] = "サギョウ シュウリョウ";
 
 Avatar avatar;
 WebServer server(80);
@@ -67,13 +79,14 @@ void handleSpeak() {
 
   const char* mode = doc["mode"] | "fixed";
   const char* text = doc["text"] | "";
-  const char* phonetic = (strcmp(mode, "fixed") == 0) ? FIXED_PHONETIC : text;
+  const char* message = (strcmp(mode, "fixed") == 0) ? FIXED_MESSAGE : text;
 
-  Serial.printf("[speak] mode=%s phonetic=%s\n", mode, phonetic);
+  Serial.printf("[speak] mode=%s message=%s\n", mode, message);
   avatar.setExpression(Expression::Happy);
   avatar.setSpeechText("(speaking)");
 
-  TTS.play(phonetic, 80);
+  // 音素列入力モードで再生(漢字対応の playK は辞書 aq_dic の配置が必要)
+  TTS.play(message, 80);
 
   avatar.setExpression(Expression::Neutral);
   avatar.setSpeechText("");
@@ -90,7 +103,8 @@ void setup() {
 
   avatar.init();
 
-  // AquesTalk pico for ESP32 初期化。ライセンスキーは secrets.h で定義。
+  // AquesTalk ESP32 初期化。ライセンスキーは secrets.h で定義。
+  // 評価版で試す場合は AQUESTALK_LICENSE_KEY をダミー値のままにしておく(ナ行・マ行が「ヌ」になる)。
   int tts_err = TTS.create(AQUESTALK_LICENSE_KEY);
   if (tts_err) {
     Serial.printf("[tts] init failed: %d\n", tts_err);
