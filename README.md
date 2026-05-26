@@ -4,10 +4,15 @@
 
 ## 対象ハードウェア
 
-- [スイッチサイエンス Stack-chan ボードキット(製品番号 11129)](https://www.switch-science.com/products/11129)同梱品
-  - M5Stack Core2
-  - SG90 互換サーボ × 2(パン・チルト)
-  - 専用ボード・ケース・ねじ類
+- **M5Stack 公式 Stack-Chan(K151系、CoreS3 ベース)**
+  - ESP32-S3 / 16MB Flash / 8MB PSRAM
+  - 2.0インチ IPS LCD + 静電容量タッチ
+  - AW88298 I2S スピーカー / デュアルマイク + ES7210
+  - UART フィードバックサーボ × 2(水平 360° / 垂直 90°)
+  - WS2812C RGB LED × 12 / 静電容量タッチパネル × 3
+  - 公式ドキュメント: https://docs.m5stack.com/ja/StackChan
+
+> ⚠️ スイッチサイエンスの旧 Stack-chan ボードキット 11129(M5Stack Core2 + SG90×2)とは別商品です。本リポジトリの実験は CoreS3 を前提に書かれています。
 
 ## 開発環境
 
@@ -21,7 +26,7 @@
 
 | 実験 | 概要 |
 | --- | --- |
-| [claude-code-notifier](experiments/claude-code-notifier/) | [Claude Code](https://claude.com/claude-code) のタスク完了時に Stack-chan が「作業が終わりました」と日本語で発話する。Stop hook + HTTP POST + AquesTalk pico for ESP32 |
+| [claude-code-notifier](experiments/claude-code-notifier/) | [Claude Code](https://claude.com/claude-code) のセッション完了(Stop hook)と権限プロンプト(Notification hook)を Stack-Chan が日本語で発話。Stack-Chan 不在時は `afplay` にフォールバック。mDNS + HTTP + AquesTalk ESP32 Ver.2.4.2+ |
 
 ## ディレクトリ構造ポリシー
 
@@ -41,7 +46,7 @@ experiments/
 - [Stack-chan 公式リポジトリ](https://github.com/stack-chan/stack-chan)
 - [meganetaaan/stackchan-arduino](https://github.com/meganetaaan/stack-chan-arduino)
 - [M5Unified](https://github.com/m5stack/M5Unified)
-- [AquesTalk ESP32](https://www.a-quest.com/products/aquestalk_esp32.html)(評価版は無償だがナ行・マ行が「ヌ」になる制限あり。継続利用・商用は有償ライセンスキーが必要。本リポジトリには同梱しません)
+- [AquesTalk ESP32](https://www.a-quest.com/products/aquestalk_esp32.html)(Ver.2.4.2 以降が CoreS3 / ESP32-S3 に正式対応。評価版は無償だがナ行・マ行が「ヌ」になる制限あり。継続利用・商用は有償ライセンスキーが必要。本リポジトリには同梱しません)
 
 ## ライセンス
 

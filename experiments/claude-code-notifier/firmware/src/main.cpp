@@ -1,32 +1,31 @@
-// Claude Code Notifier — Stack-chan side firmware
+// Claude Code Notifier — Stack-Chan (CoreS3 / K151) firmware
 //
-// HTTP POST /speak を受け取り、AquesTalk ESP32 で発話するだけの最小サーバ。
-// payload 例: {"mode":"fixed","text":"無視される"}
-//             {"mode":"free","text":"サギョウ シュウリョウ"}
-//   - mode == "fixed":     ファーム側に焼き込まれた固定文を発話(text は無視)
-//   - mode == "free" 他:   payload の text フィールドをそのまま発話
+// HTTP で通知を受け、AquesTalk ESP32 で発話する最小サーバ。
+// 出力は M5Unified の M5.Speaker(AW88298 codec)経由。AquesTalk 同梱の
+// ラッパー AquesTalkTTS は M5StampS3 用 I2S ピン直叩きで CoreS3 では音が
+// 出ないため使わず、低レベル C API (aquestalk.h) を直接呼び、PCM を
+// M5.Speaker.playRaw() に流し込む方式に変更している。
 //
-// AquesTalk ESP32 の API メモ:
-//   - TTS.createK("XXX-XXX-XXX", "/aq_dic")  漢字対応辞書つき初期化
-//   - TTS.create("XXX-XXX-XXX")              音素列のみ(辞書不要)初期化
-//   - TTS.playK("漢字仮名混じり文", speed)   漢字 → 音素変換 + 再生
-//   - TTS.play("オンソレツ", speed)           音素列を直接再生
-//   - 評価版だとナ行・マ行が「ヌ」になる制限あり。
-//     固定文を「サギョウ シュウリョウ」のようにマ・ナ行を含まない言葉にすると評価版でも崩れない。
-//
-// 注意:
-//   - ラッパー AquesTalkTTS.h は AquesTalk ESP32 同梱の examples/hello_aquestalk_tts から
-//     firmware/lib/AquesTalkTTS/src/ にコピーする(詳細は firmware/lib/AquesTalkTTS/README.md)。
-//   - 漢字対応で動かしたい場合は SPIFFS / LittleFS に aq_dic を書き込んでパスを渡す。
-//     最小構成では音素列入力(createK ではなく create + playK の音素列モード)で十分。
-//   - サーボピンは実機の配線に応じて調整すること。
+// エンドポイント:
+//   GET  /         → ステータステキスト(デバッグ用)
+//   GET  /healthz  → {"ok":true} 即返し(Mac 側スクリプトの疎通判定用)
+//   POST /speak    → JSON ペイロード
+//     {"mode":"notify","kind":"done"}    → MSG_DONE を発話 (Stop hook)
+//     {"mode":"notify","kind":"confirm"} → MSG_CONFIRM を発話 (Notification hook)
+//     {"mode":"notify","kind":"idle"}    → MSG_IDLE を発話
+//     {"mode":"fixed","kind":"done"}     → notify と同じ扱い(後方互換)
+//     {"mode":"free","text":"オンソレツ"} → text を音素列として発話
 
 #include <M5Unified.h>
 #include <Avatar.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <ESPmDNS.h>
 #include <ArduinoJson.h>
-#include <AquesTalkTTS.h>
+
+extern "C" {
+#include <aquestalk.h>
+}
 
 #include "secrets.h"
 
@@ -34,18 +33,62 @@ using namespace m5avatar;
 
 namespace {
 
-constexpr int SERVO_PIN_X = 33;  // パン(左右)
-constexpr int SERVO_PIN_Y = 32;  // チルト(上下)
+constexpr char MDNS_HOSTNAME[] = "stackchan";
 
-// AquesTalk 評価版でも崩れないようナ行・マ行を含まない固定文。
-// 製品版ライセンスを購入したら好きな文に書き換えて OK。
-constexpr char FIXED_MESSAGE[] = "サギョウ シュウリョウ";
+// AquesTalk pico は ASCII の音素記号列のみ受け付ける(漢字仮名混じり文は createK+playK+辞書が必要)。
+// 評価版でナ行・マ行が「ヌ」化する制限があるため、いずれの固定文も N/M を含まないよう構成する。
+//   '  : アクセント核    -  : 長音(または母音重ね)    .  : 文末下降    ?  : 文末上昇    空白: 句切れ
+constexpr char MSG_DONE[]    = "sa'gyou shu'uryou.";    // 作業終了
+constexpr char MSG_CONFIRM[] = "kyo'ka kuda'sai.";       // 許可ください
+constexpr char MSG_IDLE[]    = "tsugi'wa?";              // 次は?
+
+// AquesTalk の合成は 8kHz / 16-bit / mono。短い固定文 (~1-2 秒) に十分な領域を確保
+constexpr uint16_t AQ_FRAME_SAMPLES = 32;            // 1 フレームあたりサンプル数 (30-320)
+constexpr size_t   AQ_PCM_BUF_SAMPLES = 32 * 1024;   // 約 4 秒 @ 8kHz
 
 Avatar avatar;
 WebServer server(80);
 
+uint32_t aq_workbuf[AQ_SIZE_WORKBUF];
+int16_t* pcm_buf = nullptr;
+
+const char* messageForKind(const char* kind) {
+  if (kind == nullptr) return MSG_DONE;
+  if (strcmp(kind, "confirm") == 0) return MSG_CONFIRM;
+  if (strcmp(kind, "idle") == 0)    return MSG_IDLE;
+  return MSG_DONE;
+}
+
+void speakPhonemes(const char* koe) {
+  if (pcm_buf == nullptr) {
+    Serial.println("[tts] pcm_buf not allocated");
+    return;
+  }
+  uint8_t err = CAqTkPicoF_SetKoe(reinterpret_cast<const uint8_t*>(koe), 100, 0xffffU);
+  if (err) {
+    Serial.printf("[tts] SetKoe err=%u\n", err);
+    return;
+  }
+  size_t total = 0;
+  while (total + AQ_FRAME_SAMPLES <= AQ_PCM_BUF_SAMPLES) {
+    uint16_t len = 0;
+    uint8_t r = CAqTkPicoF_SyntheFrame(reinterpret_cast<short*>(&pcm_buf[total]), &len);
+    total += len;
+    if (r == 1) break;       // EOD
+    if (r >  1) {            // error
+      Serial.printf("[tts] SyntheFrame err=%u\n", r);
+      break;
+    }
+  }
+  M5.Speaker.playRaw(pcm_buf, total, 8000, false, 1, -1, true);
+  while (M5.Speaker.isPlaying()) {
+    delay(10);
+  }
+}
+
 void connectWiFi() {
   WiFi.mode(WIFI_STA);
+  WiFi.setHostname(MDNS_HOSTNAME);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.print("[wifi] connecting");
   unsigned long start = millis();
@@ -62,8 +105,27 @@ void connectWiFi() {
   avatar.setSpeechText(WiFi.localIP().toString().c_str());
 }
 
+void startMdns() {
+  if (MDNS.begin(MDNS_HOSTNAME)) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.printf("[mdns] %s.local advertised\n", MDNS_HOSTNAME);
+  } else {
+    Serial.println("[mdns] begin failed");
+  }
+}
+
 void handleRoot() {
-  server.send(200, "text/plain", "stackchan claude-code-notifier ready\n");
+  String body = "stackchan claude-code-notifier ready\n";
+  body += "ip=";
+  body += WiFi.localIP().toString();
+  body += "\nhost=";
+  body += MDNS_HOSTNAME;
+  body += ".local\n";
+  server.send(200, "text/plain", body);
+}
+
+void handleHealthz() {
+  server.send(200, "application/json", "{\"ok\":true}\n");
 }
 
 void handleSpeak() {
@@ -71,22 +133,28 @@ void handleSpeak() {
     server.send(400, "text/plain", "missing body\n");
     return;
   }
-  StaticJsonDocument<512> doc;
+  JsonDocument doc;
   if (deserializeJson(doc, server.arg("plain"))) {
     server.send(400, "text/plain", "invalid json\n");
     return;
   }
 
-  const char* mode = doc["mode"] | "fixed";
+  const char* mode = doc["mode"] | "notify";
+  const char* kind = doc["kind"] | "done";
   const char* text = doc["text"] | "";
-  const char* message = (strcmp(mode, "fixed") == 0) ? FIXED_MESSAGE : text;
 
-  Serial.printf("[speak] mode=%s message=%s\n", mode, message);
+  const char* message;
+  if (strcmp(mode, "free") == 0) {
+    message = text;
+  } else {
+    message = messageForKind(kind);
+  }
+
+  Serial.printf("[speak] mode=%s kind=%s message=%s\n", mode, kind, message);
   avatar.setExpression(Expression::Happy);
   avatar.setSpeechText("(speaking)");
 
-  // 音素列入力モードで再生(漢字対応の playK は辞書 aq_dic の配置が必要)
-  TTS.play(message, 80);
+  speakPhonemes(message);
 
   avatar.setExpression(Expression::Neutral);
   avatar.setSpeechText("");
@@ -103,17 +171,31 @@ void setup() {
 
   avatar.init();
 
-  // AquesTalk ESP32 初期化。ライセンスキーは secrets.h で定義。
-  // 評価版で試す場合は AQUESTALK_LICENSE_KEY をダミー値のままにしておく(ナ行・マ行が「ヌ」になる)。
-  int tts_err = TTS.create(AQUESTALK_LICENSE_KEY);
-  if (tts_err) {
-    Serial.printf("[tts] init failed: %d\n", tts_err);
+  // AquesTalk pico 初期化。AQUESTALK_LICENSE_KEY は secrets.h で定義。
+  // 評価版で試す場合は "XXX-XXX-XXX" ダミー値で OK(ナ行・マ行は「ヌ」化)。
+  uint8_t aq_err = CAqTkPicoF_Init(aq_workbuf, AQ_FRAME_SAMPLES, AQUESTALK_LICENSE_KEY);
+  if (aq_err) {
+    Serial.printf("[tts] CAqTkPicoF_Init failed: %u\n", aq_err);
+  }
+
+  // PCM バッファ確保(64KB)。PSRAM があれば PSRAM 優先で確保
+  pcm_buf = static_cast<int16_t*>(
+      heap_caps_malloc(AQ_PCM_BUF_SAMPLES * sizeof(int16_t),
+                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (pcm_buf == nullptr) {
+    pcm_buf = static_cast<int16_t*>(
+        heap_caps_malloc(AQ_PCM_BUF_SAMPLES * sizeof(int16_t), MALLOC_CAP_8BIT));
+  }
+  if (pcm_buf == nullptr) {
+    Serial.println("[tts] pcm_buf alloc failed");
   }
 
   connectWiFi();
+  startMdns();
 
-  server.on("/", HTTP_GET, handleRoot);
-  server.on("/speak", HTTP_POST, handleSpeak);
+  server.on("/",        HTTP_GET,  handleRoot);
+  server.on("/healthz", HTTP_GET,  handleHealthz);
+  server.on("/speak",   HTTP_POST, handleSpeak);
   server.begin();
   Serial.println("[http] server listening on :80");
 }
