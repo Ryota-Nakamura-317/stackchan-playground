@@ -30,6 +30,7 @@ extern "C" {
 
 #include "secrets.h"
 #include "idle_motion.h"
+#include "sleep_manager.h"
 
 using namespace m5avatar;
 
@@ -141,6 +142,8 @@ void handleSpeak() {
     return;
   }
 
+  sleep_manager::notify_activity();
+
   const char* mode = doc["mode"] | "notify";
   const char* kind = doc["kind"] | "done";
   const char* text = doc["text"] | "";
@@ -209,11 +212,13 @@ void setup() {
   // BSP の Motion は M5StackChan.begin() の最後で goHome() (= 中央へ移動)
   // を呼んでいるので、idle motion は init から少し時間を置いて開始する。
   idle_motion::init();
+  sleep_manager::init(avatar);
 }
 
 void loop() {
   M5StackChan.update();
   server.handleClient();
+  sleep_manager::tick(millis());
   idle_motion::tick(millis());
   delay(1);
 }
