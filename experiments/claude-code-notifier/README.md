@@ -21,7 +21,7 @@ Stack-Chan が同一 LAN に居ないときは `afplay /System/Library/Sounds/Pi
 - 公式モバイルアプリ連携(映像視聴・アバター遠隔操作・OTA)
 - アプリ内ストアからのオンラインダウンロード
 - 工場ファーム経由の OTA アップデート
-- K151 のフィードバックサーボ制御(本スケッチでは未実装)
+- AI Agent 連動の表情モーションや遠隔操作機能(本スケッチでは「待機中のきょろきょろ」と発話だけ実装。詳細は下記 **待機中の首振り (idle motion)** を参照)
 
 ESP32 は同時に走るアプリが 1 つだけなので、**工場ファームと本ファームを同居させて両方動かすことはできません**。OTA パーティション(`factory` / `app0` / `app1`)を使ったブート切替によるデュアルブートは理論上可能ですが、工場ファームのパーティション構成は非公開かつ独自で、合わせて再ビルドする手段がないため非現実的です。
 
@@ -53,8 +53,10 @@ Claude Code (Mac)
 Stack-Chan (CoreS3)
   ├─ Wi-Fi STA + mDNS (stackchan.local を公開)
   ├─ GET /healthz → 200 即返し
-  └─ POST /speak  → AquesTalk pico で PCM 合成 → M5.Speaker.playRaw() 出力
-                    + Avatar 表情変化
+  ├─ POST /speak  → AquesTalk pico で PCM 合成 → M5.Speaker.playRaw() 出力
+  │                 + Avatar 表情変化(発話中は idle motion 停止)
+  └─ idle motion  → StackChan-BSP の Motion API でランダムに首を振る
+                    (2〜5 秒間隔、yaw ±20° / pitch 35°±10°)
 ```
 
 > 内部実装メモ: AquesTalk 同梱のラッパー `AquesTalkTTS` は M5StampS3 用 I2S ピン固定で CoreS3 では使えないため、低レベル C API (`aquestalk.h`) を直接呼んで M5Unified の `M5.Speaker.playRaw()` (AW88298 codec を正しく初期化済み) に流し込んでいます。
@@ -220,6 +222,62 @@ echo '{"hook_event_name":"Notification","message":"Claude needs your permission 
 - 普段拒否設定のコマンドを依頼して権限プロンプトを発生させる → 「kyo'ka kuda'sai.」(許可ください)
 - Stack-Chan の電源を切って同じ操作 → Ping 音にフォールバック
 
+## 待機中の首振り (idle motion)
+
+通知待機中も「生きている感」を出すため、yaw / pitch サーボを **2〜5 秒間隔で
+ランダムに小さく動かします**。発話中 (`/speak` 受信〜再生完了) は自動で止まります。
+
+### 仕組み
+
+公式 Arduino 用 BSP [`m5stack/StackChan-BSP`](https://github.com/m5stack/StackChan-BSP)
+(MIT) を `platformio.ini` の `lib_deps` で取り込み、`M5StackChan.begin()` 一発で:
+
+- PY32L020 IO Expander 経由のサーボ電源 (VM EN) ON
+- Feetech SCS シリアルバスサーボの UART_NUM_1 / 1 Mbps / GPIO 6,7 初期化
+- 内部 FreeRTOS task による補間アニメーション
+
+を済ませます。本ファームの `firmware/src/idle_motion.cpp` は `Motion.move(yaw, pitch, speed)`
+を周期的に呼ぶだけなので非ブロッキング (補間中も `loop()` は通常通り回る)。
+
+### 振幅・周期の調整
+
+`firmware/src/idle_motion.cpp` 冒頭の定数を編集して再フラッシュ:
+
+| 定数 | 既定値 | 単位 / 意味 |
+|---|---|---|
+| `kYawAmplitude` | 200 | 1/10 度 (±20°) |
+| `kPitchCenter` | 350 | 1/10 度 (= 35°、少し上向き) |
+| `kPitchAmplitude` | 100 | 1/10 度 (±10°) |
+| `kSpeedMin` / `kSpeedMax` | 200 / 400 | 0〜1000 (小さいほどゆっくり) |
+| `kPauseMinMs` / `kPauseMaxMs` | 2000 / 5000 | 次の動きまでの間隔 (ms) |
+
+### 完全に無効化したい
+
+`setup()` 末尾の `idle_motion::init();` を削除するか、その直後に
+`idle_motion::set_enabled(false);` を 1 行足す。
+
+### 首が傾いて見える
+
+BSP の `examples/Servo/HomeCalibration/HomeCalibration.ino` を一旦焼いて画面タッチで
+ホーム位置を再キャリブレーション → NVS の `servo` namespace に保存される → 本ファームに
+戻すとそのホーム位置が引き継がれる。
+
+> ⚠️ `M5StackChan.begin()` の最後でサーボが中央位置 (yaw=0, pitch=0) に動きます。
+> 起動前に **必ず机に固定** してください (手で持ったまま電源を入れると無理に動かす力が
+> 加わる可能性)。
+
+> ℹ️ 工場ファームに M5Burner で戻せば AI Agent やモバイルアプリ連動も復活します
+> ([⚠️ 工場出荷時ファームウェアへの影響](#-工場出荷時ファームウェアへの影響))。
+
+### 開発履歴メモ
+
+最初は `m5stack/StackChan` (ESP-IDF v5 のフルファーム) から `SCSCL` / `PY32IOExpander`
+ドライバを抜き出して PlatformIO + Arduino に手動移植する方針で着手したが、
+`M5.In_I2C.readRegister8` がエラー時 0 を返す挙動や、PY32 アドレス 0x6F へのアクセスが
+意図通り効かない問題で、サーボバスから Ping 応答を得られず詰まった。
+その後の調査で **Arduino 向け公式 BSP `m5stack/StackChan-BSP`** の存在を発見し、
+こちらに切り替えて一発で疎通成功した。教訓: K151 用に自前移植する前に BSP を探すこと。
+
 ## トラブルシュート
 
 | 症状 | 確認ポイント |
@@ -231,6 +289,8 @@ echo '{"hook_event_name":"Notification","message":"Claude needs your permission 
 | `stackchan.local` が引けない / curl がタイムアウトする | macOS の curl は mDNS 解決に 3〜5 秒かかることが多い。`config.local.sh` の `STACKCHAN_HOST` を IP 直書きにする(推奨) |
 | `Operation not permitted` で curl が即時失敗 | macOS Sequoia 以降のローカルネットワーク権限。システム設定 → プライバシーとセキュリティ → ローカルネットワーク → Terminal / iTerm を ON |
 | `/speak` で音が出ない | `firmware/lib/AquesTalkTTS/src/libaquestalk.a` が esp32s3 用か、CoreS3 のスピーカー音量が 0 になっていないか、AquesTalk が Ver.2.4.2 以上か。シリアルに `[tts] SetKoe err=105` が出ていたら `mode:free` で UTF-8 を渡している(ASCII の音素記号列が必要) |
+| 首が動かない | シリアルに `Servo ID: 1 get zero pos: ...` が出ていない → BSP の `M5StackChan.begin()` 内で PY32 IO Expander init がタイムアウトしている可能性。バッテリーの残量、CoreS3 とボディの結合、サーボコネクタを確認 |
+| 首が傾いている | `examples/Servo/HomeCalibration` (BSP 同梱) で再キャリブレーション。詳細は **待機中の首振り (idle motion)** セクション参照 |
 | 音は出るが「ヌヌヌ」 | 評価版の制限が出ている。固定文は kind ごとにナ行・マ行(N/M)を含まない設計なので発生しないはず。自由文(`mode:free`)で発生するなら製品版を購入 |
 | hook が動かない | `chmod +x scripts/notify_stackchan.sh` 済みか、`~/.claude/settings.json` の `command` が絶対パスか、`scripts/config.local.sh` の `STACKCHAN_HOST` が正しいか |
 | 二重に発話される | リポジトリ内 `.claude/settings.local.json` にも旧 hook が残っていないか確認 |
@@ -243,6 +303,6 @@ echo '{"hook_event_name":"Notification","message":"Claude needs your permission 
 
 ## スコープ外 / 今後の拡張
 
-- **サーボ制御(うなずき・首振り)**: K151 のサーボは UART フィードバックサーボ(G6/G7)で SG90 PWM とは別物。本実験では発話と LCD 表情だけに絞っています。サーボを動かしたい場合は M5Stack 公式の StackChan BSP Driver Library を別実験で導入してください。
+- **サーボの高度な動作**: 待機中ランダム首振りは実装済み (**待機中の首振り (idle motion)** 参照)。発話と同期したうなずき、感情に応じた首振り、ユーザー操作への反応モーション等は未実装。BSP の `M5StackChan.Motion.move()` を発話イベントに合わせて呼ぶ等で容易に拡張可能。
 - **複数 Stack-Chan への同報**: 単機運用なら HTTP 直叩きで十分。複数機なら MQTT ブローカ経由が候補。
 - **出張先での通知**: 現状フォールバックは `afplay` のみ。`say -v Kyoko` 等への切り替えは `notify_stackchan.sh` の `play_fallback` 関数を編集。

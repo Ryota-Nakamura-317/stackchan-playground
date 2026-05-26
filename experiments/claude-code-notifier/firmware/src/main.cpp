@@ -17,6 +17,7 @@
 //     {"mode":"free","text":"オンソレツ"} → text を音素列として発話
 
 #include <M5Unified.h>
+#include <M5StackChan.h>
 #include <Avatar.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -28,6 +29,7 @@ extern "C" {
 }
 
 #include "secrets.h"
+#include "idle_motion.h"
 
 using namespace m5avatar;
 
@@ -151,6 +153,7 @@ void handleSpeak() {
   }
 
   Serial.printf("[speak] mode=%s kind=%s message=%s\n", mode, kind, message);
+  idle_motion::set_enabled(false);
   avatar.setExpression(Expression::Happy);
   avatar.setSpeechText("(speaking)");
 
@@ -158,14 +161,18 @@ void handleSpeak() {
 
   avatar.setExpression(Expression::Neutral);
   avatar.setSpeechText("");
+  idle_motion::set_enabled(true);
   server.send(200, "application/json", "{\"ok\":true}\n");
 }
 
 }  // namespace
 
 void setup() {
-  auto cfg = M5.config();
-  M5.begin(cfg);
+  // M5StackChan.begin() の中で M5.begin() + PY32 (VM EN) + SCS バス + Motion
+  // + INA226 が一括初期化される。M5.config() で何か追加設定したい場合は
+  // 別途 M5.config() を呼んでから M5.begin(cfg) → M5StackChan.begin() の順に
+  // することも可能だが、本ファームは標準設定で問題ないため一発で済ませる。
+  M5StackChan.begin();
   M5.Speaker.setVolume(200);
   Serial.begin(115200);
 
@@ -198,10 +205,15 @@ void setup() {
   server.on("/speak",   HTTP_POST, handleSpeak);
   server.begin();
   Serial.println("[http] server listening on :80");
+
+  // BSP の Motion は M5StackChan.begin() の最後で goHome() (= 中央へ移動)
+  // を呼んでいるので、idle motion は init から少し時間を置いて開始する。
+  idle_motion::init();
 }
 
 void loop() {
-  M5.update();
+  M5StackChan.update();
   server.handleClient();
+  idle_motion::tick(millis());
   delay(1);
 }
