@@ -31,6 +31,7 @@ extern "C" {
 #include "secrets.h"
 #include "idle_motion.h"
 #include "sleep_manager.h"
+#include "pet_reaction.h"
 
 using namespace m5avatar;
 
@@ -213,6 +214,7 @@ void setup() {
   // を呼んでいるので、idle motion は init から少し時間を置いて開始する。
   idle_motion::init();
   sleep_manager::init(avatar);
+  pet_reaction::init(avatar);
 }
 
 void loop() {
@@ -220,5 +222,6 @@ void loop() {
   server.handleClient();
   sleep_manager::tick(millis());
   idle_motion::tick(millis());
+  pet_reaction::tick(millis());
   delay(1);
 }

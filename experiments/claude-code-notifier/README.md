@@ -21,7 +21,7 @@ Stack-Chan が同一 LAN に居ないときは `afplay /System/Library/Sounds/Pi
 - 公式モバイルアプリ連携(映像視聴・アバター遠隔操作・OTA)
 - アプリ内ストアからのオンラインダウンロード
 - 工場ファーム経由の OTA アップデート
-- AI Agent 連動の表情モーションや遠隔操作機能(本スケッチでは「待機中のきょろきょろ」と発話だけ実装。詳細は下記 **待機中の首振り (idle motion)** を参照)
+- AI Agent 連動の表情モーションや遠隔操作機能(本スケッチでは「待機中のきょろきょろ」「頭頂部を撫でられたら喜ぶ」と発話だけ実装。詳細は下記 **待機中の首振り (idle motion)** / **頭を撫でられたら喜ぶ (pet reaction)** を参照)
 
 ESP32 は同時に走るアプリが 1 つだけなので、**工場ファームと本ファームを同居させて両方動かすことはできません**。OTA パーティション(`factory` / `app0` / `app1`)を使ったブート切替によるデュアルブートは理論上可能ですが、工場ファームのパーティション構成は非公開かつ独自で、合わせて再ビルドする手段がないため非現実的です。
 
@@ -55,8 +55,10 @@ Stack-Chan (CoreS3)
   ├─ GET /healthz → 200 即返し
   ├─ POST /speak  → AquesTalk pico で PCM 合成 → M5.Speaker.playRaw() 出力
   │                 + Avatar 表情変化(発話中は idle motion 停止)
-  └─ idle motion  → StackChan-BSP の Motion API でランダムに首を振る
-                    (2〜5 秒間隔、yaw ±20° / pitch 35°±10°)
+  ├─ idle motion  → StackChan-BSP の Motion API でランダムに首を振る
+  │                 (2〜5 秒間隔、yaw ±20° / pitch 35°±10°)
+  └─ pet reaction → 頭頂部の前後スワイプ (BSP TouchSensor) で
+                    Happy 表情 + RGB LED 暖色点灯 (3 秒)。スリープ中なら起床も兼ねる
 ```
 
 > 内部実装メモ: AquesTalk 同梱のラッパー `AquesTalkTTS` は M5StampS3 用 I2S ピン固定で CoreS3 では使えないため、低レベル C API (`aquestalk.h`) を直接呼んで M5Unified の `M5.Speaker.playRaw()` (AW88298 codec を正しく初期化済み) に流し込んでいます。
@@ -269,6 +271,32 @@ BSP の `examples/Servo/HomeCalibration/HomeCalibration.ino` を一旦焼いて�
 > ℹ️ 工場ファームに M5Burner で戻せば AI Agent やモバイルアプリ連動も復活します
 > ([⚠️ 工場出荷時ファームウェアへの影響](#-工場出荷時ファームウェアへの影響))。
 
+## 頭を撫でられたら喜ぶ (pet reaction)
+
+工場ファームの「頭を撫でると喜ぶ」を最小限で復活させた機能。
+頭頂部 (CoreS3 LCD 上のタッチパネルではなく、ロボットボディ側の Si12T 3 ゾーン静電容量センサ) を
+**前→後ろ または 後ろ→前にスワイプ**すると、Avatar が約 3 秒間 `Expression::Happy` に切り替わり、
+12 個の WS2812C RGB LED が暖色ピンクで点灯します。単発タッチ (wasClicked) は意図的に拾わず、
+「撫でた感」のあるスワイプのみに反応します。
+
+### 仕組み
+
+- 検出: `M5StackChan.TouchSensor.wasSwipedForward() / wasSwipedBackward()` (BSP がジェスチャ検出済み)
+- 表情: `m5avatar::Avatar::setExpression(Expression::Happy)` → 3 秒後 `Neutral` に戻す
+- LED: `M5StackChan.showRgbColor(r, g, b)` で全 12 個を一括点灯/消灯
+- スリープ中の撫で: `sleep_manager::notify_activity()` を先に呼んで AWAKE 復帰させてから喜ぶ
+- idle motion との競合: HAPPY 中は `idle_motion::set_enabled(false)` で停止、終了時に再開
+- 連続して撫で続けると HAPPY タイマだけが延長され、喜びが持続する
+
+### チューニング
+
+`firmware/src/pet_reaction.cpp` 冒頭の定数:
+
+| 定数 | 既定値 | 意味 |
+|---|---|---|
+| `kHappyDurationMs` | 3000 | 喜び状態の継続時間 (ms) |
+| `kHappyR / G / B` | 255 / 80 / 120 | LED 暖色ピンクの RGB |
+
 ### 開発履歴メモ
 
 最初は `m5stack/StackChan` (ESP-IDF v5 のフルファーム) から `SCSCL` / `PY32IOExpander`
@@ -303,6 +331,6 @@ BSP の `examples/Servo/HomeCalibration/HomeCalibration.ino` を一旦焼いて�
 
 ## スコープ外 / 今後の拡張
 
-- **サーボの高度な動作**: 待機中ランダム首振りは実装済み (**待機中の首振り (idle motion)** 参照)。発話と同期したうなずき、感情に応じた首振り、ユーザー操作への反応モーション等は未実装。BSP の `M5StackChan.Motion.move()` を発話イベントに合わせて呼ぶ等で容易に拡張可能。
+- **サーボの高度な動作**: 待機中ランダム首振りと、頭を撫でられた時の喜び表現 (表情 + LED) は実装済み (**待機中の首振り (idle motion)** / **頭を撫でられたら喜ぶ (pet reaction)** 参照)。発話と同期したうなずきや、撫でられた時のサーボでの反応モーションは未実装。BSP の `M5StackChan.Motion.move()` をイベントに合わせて呼ぶ等で拡張可能。
 - **複数 Stack-Chan への同報**: 単機運用なら HTTP 直叩きで十分。複数機なら MQTT ブローカ経由が候補。
 - **出張先での通知**: 現状フォールバックは `afplay` のみ。`say -v Kyoko` 等への切り替えは `notify_stackchan.sh` の `play_fallback` 関数を編集。
