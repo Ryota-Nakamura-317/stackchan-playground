@@ -64,6 +64,15 @@ const char* messageForKind(const char* kind) {
   return MSG_DONE;
 }
 
+// 吹き出し(画面表示)用の文言。AquesTalk と違い M5GFX の文字描画なので
+// 「!」を含む任意の日本語を表示できる(音声側の MSG_* とは別物)。
+const char* balloonForKind(const char* kind) {
+  if (kind == nullptr) return "できたよ！";
+  if (strcmp(kind, "confirm") == 0) return "許可ください";
+  if (strcmp(kind, "idle") == 0)    return "次は？";
+  return "できたよ！";
+}
+
 void speakPhonemes(const char* koe) {
   if (pcm_buf == nullptr) {
     Serial.println("[tts] pcm_buf not allocated");
@@ -166,7 +175,9 @@ void handleSpeak() {
   Serial.printf("[speak] mode=%s kind=%s message=%s\n", mode, kind, message);
   idle_motion::set_enabled(false);
   avatar.setExpression(Expression::Happy);
-  avatar.setSpeechText("(speaking)");
+  // free モードは音素記号列が来るため吹き出しには出さず固定表示にする。
+  const char* balloon = (strcmp(mode, "free") == 0) ? "(speaking)" : balloonForKind(kind);
+  avatar.setSpeechText(balloon);
 
   speakPhonemes(message);
 
@@ -187,6 +198,9 @@ void setup() {
   Serial.begin(115200);
 
   avatar.init();
+
+  // 吹き出しに日本語を表示するため日本語フォントを設定(未設定だと ASCII のみ)。
+  avatar.setSpeechFont(&fonts::lgfxJapanGothicP_16);
 
   // AquesTalk pico 初期化。AQUESTALK_LICENSE_KEY は secrets.h で定義。
   // 評価版で試す場合は "XXX-XXX-XXX" ダミー値で OK(ナ行・マ行は「ヌ」化)。
