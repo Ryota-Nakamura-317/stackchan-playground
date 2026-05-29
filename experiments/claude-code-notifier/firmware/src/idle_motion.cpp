@@ -22,8 +22,8 @@ constexpr int kPitchCenter    = 350;   // 35° (少し上向きをニュート�
 constexpr int kPitchAmplitude = 100;   // ±10°
 constexpr int kSpeedMin       = 200;   // 0〜1000。小さいほどゆっくり
 constexpr int kSpeedMax       = 400;
-constexpr uint32_t kPauseMinMs    = 2000;  // 次の動きまでの待ち
-constexpr uint32_t kPauseMaxMs    = 5000;
+constexpr uint32_t kPauseMinMs    = 3500;  // 次の動きまでの待ち
+constexpr uint32_t kPauseMaxMs    = 7000;
 constexpr uint32_t kStartupDelayMs = 2500; // init から最初の抽選までの間
 
 bool s_enabled = true;
