@@ -317,6 +317,7 @@ BSP の `examples/Servo/HomeCalibration/HomeCalibration.ino` を一旦焼いて�
 | `stackchan.local` が引けない / curl がタイムアウトする | macOS の curl は mDNS 解決に 3〜5 秒かかることが多い。`config.local.sh` の `STACKCHAN_HOST` を IP 直書きにする(推奨) |
 | `Operation not permitted` で curl が即時失敗 | macOS Sequoia 以降のローカルネットワーク権限。システム設定 → プライバシーとセキュリティ → ローカルネットワーク → Terminal / iTerm を ON |
 | `/speak` で音が出ない | `firmware/lib/AquesTalkTTS/src/libaquestalk.a` が esp32s3 用か、CoreS3 のスピーカー音量が 0 になっていないか、AquesTalk が Ver.2.4.2 以上か。シリアルに `[tts] SetKoe err=105` が出ていたら `mode:free` で UTF-8 を渡している(ASCII の音素記号列が必要) |
+| `/speak` が即 200 を返すのに無音 (`time_total` ~0.1s) | 音素記号列が AquesTalk に弾かれて `SetKoe` がエラー(シリアルに `[tts] SetKoe err=N`)→ `speakPhonemes()` が即 return。**文末 `!` が代表的な原因**。`.` / `?` / 記号なしに直す(上の **発話文言を変えたい** 参照) |
 | 首が動かない | シリアルに `Servo ID: 1 get zero pos: ...` が出ていない → BSP の `M5StackChan.begin()` 内で PY32 IO Expander init がタイムアウトしている可能性。バッテリーの残量、CoreS3 とボディの結合、サーボコネクタを確認 |
 | 首が傾いている | `examples/Servo/HomeCalibration` (BSP 同梱) で再キャリブレーション。詳細は **待機中の首振り (idle motion)** セクション参照 |
 | 音は出るが「ヌヌヌ」 | 評価版の制限が出ている。固定文は kind ごとにナ行・マ行(N/M)を含まない設計なので発生しないはず。自由文(`mode:free`)で発生するなら製品版を購入 |
@@ -325,7 +326,8 @@ BSP の `examples/Servo/HomeCalibration/HomeCalibration.ino` を一旦焼いて�
 
 ## 発話文言を変えたい
 
-- 固定文(kind ごと)を変えたい: `firmware/src/main.cpp` の `MSG_DONE` / `MSG_CONFIRM` / `MSG_IDLE` を編集して焼き直し。**AquesTalk pico は ASCII の音素記号列のみ受け付ける**(`'` がアクセント核、`-` が長音、` ` が句切れ、`.` `?` `!` が文末)。詳細は [AquesTalk 音声記号列の仕様](https://www.a-quest.com/archive/manual/siyo_onseikigou.pdf)を参照。評価版ならナ行・マ行を避ける。
+- 固定文(kind ごと)を変えたい: `firmware/src/main.cpp` の `MSG_DONE` / `MSG_CONFIRM` / `MSG_IDLE` を編集して焼き直し。**AquesTalk pico は ASCII の音素記号列のみ受け付ける**(`'` がアクセント核、`-` が長音、` ` が句切れ、`.` が文末下降、`?` が文末上昇)。詳細は [AquesTalk 音声記号列の仕様](https://www.a-quest.com/archive/manual/siyo_onseikigou.pdf)を参照。評価版ならナ行・マ行を避ける。
+  - ⚠️ **文末に `!` は使えない**。AquesTalk は `!` を受け付けず `CAqTkPicoF_SetKoe` がエラーを返し、`speakPhonemes()` がそのまま return するため **無音のまま `/speak` は 200 を返す**(curl の `time_total` が ~0.1s と異様に速ければこれ)。テンションを出したいときは `?`(語尾上げ)や `-`(語尾伸ばし、例 `deki'tayo-`)で代用する。
 - 漢字仮名混じり文を喋らせたい: AquesTalk 製品版ライセンス + 同梱辞書 `aq_dic/aqdic_m.bin` を LittleFS に焼き込み、`CAqK2R_Convert` + `CAqTkPicoF_SetKoe` に切り替える(将来の拡張)
 - 通知種別ごとに別の文言を Mac 側で組み立てたい: `notify_stackchan.sh` の KIND 決定ロジックを拡張、または `mode:free` で音素記号列を直接渡す
 

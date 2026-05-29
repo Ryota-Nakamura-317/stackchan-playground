@@ -42,7 +42,7 @@ constexpr char MDNS_HOSTNAME[] = "stackchan";
 // AquesTalk pico は ASCII の音素記号列のみ受け付ける(漢字仮名混じり文は createK+playK+辞書が必要)。
 // 評価版でナ行・マ行が「ヌ」化する制限があるため、いずれの固定文も N/M を含まないよう構成する。
 //   '  : アクセント核    -  : 長音(または母音重ね)    .  : 文末下降    ?  : 文末上昇    空白: 句切れ
-constexpr char MSG_DONE[]    = "sa'gyou shu'uryou.";    // 作業終了
+constexpr char MSG_DONE[]    = "deki'tayo?";            // できたよ?(語尾上げ)
 constexpr char MSG_CONFIRM[] = "kyo'ka kuda'sai.";       // 許可ください
 constexpr char MSG_IDLE[]    = "tsugi'wa?";              // 次は?
 
