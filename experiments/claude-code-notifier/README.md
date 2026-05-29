@@ -21,7 +21,7 @@ Stack-Chan が同一 LAN に居ないときは `afplay /System/Library/Sounds/Pi
 - 公式モバイルアプリ連携(映像視聴・アバター遠隔操作・OTA)
 - アプリ内ストアからのオンラインダウンロード
 - 工場ファーム経由の OTA アップデート
-- AI Agent 連動の表情モーションや遠隔操作機能(本スケッチでは「待機中のきょろきょろ」「頭頂部を撫でられたら喜ぶ」と発話だけ実装。詳細は下記 **待機中の首振り (idle motion)** / **頭を撫でられたら喜ぶ (pet reaction)** を参照)
+- AI Agent 連動の表情モーションや遠隔操作機能(本スケッチでは「待機中のきょろきょろ」「頭頂部を撫でられたら喜ぶ」「画面で音量調整」と発話だけ実装。詳細は下記 **待機中の首振り (idle motion)** / **頭を撫でられたら喜ぶ (pet reaction)** / **画面で音量を調整する (volume control)** を参照)
 
 ESP32 は同時に走るアプリが 1 つだけなので、**工場ファームと本ファームを同居させて両方動かすことはできません**。OTA パーティション(`factory` / `app0` / `app1`)を使ったブート切替によるデュアルブートは理論上可能ですが、工場ファームのパーティション構成は非公開かつ独自で、合わせて再ビルドする手段がないため非現実的です。
 
@@ -305,6 +305,38 @@ BSP の `examples/Servo/HomeCalibration/HomeCalibration.ino` を一旦焼いて�
 意図通り効かない問題で、サーボバスから Ping 応答を得られず詰まった。
 その後の調査で **Arduino 向け公式 BSP `m5stack/StackChan-BSP`** の存在を発見し、
 こちらに切り替えて一発で疎通成功した。教訓: K151 用に自前移植する前に BSP を探すこと。
+
+## 画面で音量を調整する (volume control)
+
+スピーカー音量を、再ビルド・再書き込みなしに **CoreS3 の LCD 画面だけ** で変えられる機能。
+
+**LCD を長押し**すると Avatar の顔が消えて全画面の音量 UI が出ます。`−` / `+` ボタンのタップで
+音量が増減し（その場で反映）、`OK` ボタンまたは無操作 8 秒で UI が閉じて顔に戻ります。
+調整した音量は NVS に保存され、**電源を切っても次回起動時に復元**されます。
+
+### 仕組み
+
+- トリガー: `M5.Touch.getDetail().wasHold()` (LCD 静電容量タッチの長押し)
+- 描画: UI 表示中は `avatar.stop()` で Avatar の描画タスクを終了させ、`M5.Display` へ直接 UI を描く。
+  閉じるときに `avatar.start()` でタスクを作り直す (`suspend()/resume()` はネスト非対応で
+  `setExpression()` と競合するため使わない)
+- 反映: `−`/`+` タップで即 `M5.Speaker.setVolume()`。NVS への書き込みは閉じる瞬間に 1 回だけ
+  (フラッシュ摩耗回避)
+- 永続化: BSP の `Settings` クラス (NVS ラッパ) を再利用。namespace `"stackchan"` / key `"spk_vol"`。
+  サーボ較正の `"servo"` namespace とは分離
+- 他モジュールとの競合: UI 表示中は描画タスクが居ないため、`setExpression()` を呼ぶ
+  `sleep_manager` / `pet_reaction` の tick と `/speak` 発話を停止 (`volume_control::is_active()` で判定)
+
+### チューニング
+
+`firmware/src/volume_control.cpp` 冒頭の定数:
+
+| 定数 | 既定値 | 意味 |
+|---|---|---|
+| `kVolMin / kVolMax` | 40 / 255 | 音量レンジ (0 は無音なので下限を設けている) |
+| `kVolStep` | 24 | 1 タップあたりの増減量 (約 9 段階) |
+| `kVolDefault` | 200 | NVS 未保存時の初期値 (旧ハードコード値と同じ) |
+| `kAutoCloseMs` | 8000 | 無操作で UI が自動的に閉じるまでの時間 (ms) |
 
 ## トラブルシュート
 

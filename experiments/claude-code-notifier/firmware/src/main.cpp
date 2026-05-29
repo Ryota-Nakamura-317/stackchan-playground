@@ -32,6 +32,7 @@ extern "C" {
 #include "idle_motion.h"
 #include "sleep_manager.h"
 #include "pet_reaction.h"
+#include "volume_control.h"
 
 using namespace m5avatar;
 
@@ -133,6 +134,12 @@ void handleHealthz() {
 }
 
 void handleSpeak() {
+  // 音量調整 UI 表示中は Avatar の描画タスクを止めているため、発話で
+  // setExpression() を呼ぶと不正タスクハンドルに触れる。ビジーとして弾く。
+  if (volume_control::is_active()) {
+    server.send(409, "text/plain", "busy (volume UI)\n");
+    return;
+  }
   if (!server.hasArg("plain")) {
     server.send(400, "text/plain", "missing body\n");
     return;
@@ -177,7 +184,6 @@ void setup() {
   // 別途 M5.config() を呼んでから M5.begin(cfg) → M5StackChan.begin() の順に
   // することも可能だが、本ファームは標準設定で問題ないため一発で済ませる。
   M5StackChan.begin();
-  M5.Speaker.setVolume(200);
   Serial.begin(115200);
 
   avatar.init();
@@ -215,13 +221,20 @@ void setup() {
   idle_motion::init();
   sleep_manager::init(avatar);
   pet_reaction::init(avatar);
+  // 音量を NVS から復元して M5.Speaker.setVolume() を適用 (avatar.init() の後)
+  volume_control::init(avatar);
 }
 
 void loop() {
   M5StackChan.update();
   server.handleClient();
-  sleep_manager::tick(millis());
-  idle_motion::tick(millis());
-  pet_reaction::tick(millis());
+  volume_control::tick(millis());
+  // UI 表示中は Avatar 描画タスクが止まっており、setExpression() を呼ぶ他モジュールを
+  // 走らせると不正タスクハンドルに触れる。UI が閉じている間だけ tick する。
+  if (!volume_control::is_active()) {
+    sleep_manager::tick(millis());
+    idle_motion::tick(millis());
+    pet_reaction::tick(millis());
+  }
   delay(1);
 }
