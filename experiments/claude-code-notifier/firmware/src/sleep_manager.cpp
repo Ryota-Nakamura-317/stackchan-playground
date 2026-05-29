@@ -23,7 +23,7 @@ namespace sleep_manager {
 
 namespace {
 
-constexpr uint32_t kIdleSleepyAfterMs    = 5UL * 60UL * 1000UL;   // 5 min
+constexpr uint32_t kIdleSleepyAfterMs    = 10UL * 60UL * 1000UL;  // 10 min
 constexpr uint32_t kSleepyToSleepingMs   = 10UL * 1000UL;         // 10 s
 constexpr uint32_t kSleepingToPowerOffMs = 30UL * 1000UL;         // 30 s
 
