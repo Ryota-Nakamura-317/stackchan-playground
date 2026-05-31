@@ -36,11 +36,15 @@ constexpr char kNvsNamespace[] = "stackchan";
 constexpr char kNvsKey[]       = "spk_vol";  // NVS キーは 15 文字以内
 
 // ─── UI レイアウト (320x240) ─────────────────────────
-constexpr int kBarX = 40, kBarY = 100, kBarW = 240, kBarH = 30;
-constexpr int kBtnY = 158, kBtnH = 64, kBtnW = 70;
+constexpr int kBarX = 40, kBarY = 104, kBarW = 240, kBarH = 22;
+constexpr int kBtnY = 162, kBtnH = 56, kBtnW = 70;
 constexpr int kMinusX = 24;
 constexpr int kCloseX = 124, kCloseW = 72;
 constexpr int kPlusX  = 226;
+
+// 右上のバッテリーアイコン (本体 + 右端の端子)。タイトル "VOLUME" (y=22) と被らない上端へ。
+constexpr int kBatX = 282, kBatY = 8, kBatW = 28, kBatH = 14;
+constexpr int kBatTipW = 3, kBatTipH = 6;
 
 // 無操作が続いたら自動で閉じる
 constexpr uint32_t kAutoCloseMs = 8000;
@@ -80,9 +84,59 @@ void draw_button(int x, int label_pos_y, const char* label, uint16_t fill_c) {
   const uint16_t white = d.color565(235, 240, 245);
   d.fillRoundRect(x, kBtnY, kBtnW, kBtnH, 10, fill_c);
   d.setTextColor(white, fill_c);
-  d.setTextSize(3);
+  d.setTextSize(2);
   d.setTextDatum(textdatum_t::middle_center);
   d.drawString(label, x + kBtnW / 2, label_pos_y);
+}
+
+// 右上に小さくバッテリー残量を描く。残量% テキスト + アイコン + 充電中の稲妻。
+// draw_ui() からのみ呼ぶ (SHOWING 中は Avatar 描画タスクが停止しており Display を独占)。
+void draw_battery() {
+  auto& d = M5.Display;
+  const uint16_t bg     = d.color565(12, 16, 28);
+  const uint16_t white  = d.color565(235, 240, 245);
+  const uint16_t panel  = d.color565(40, 48, 70);
+  const uint16_t green  = d.color565(120, 220, 130);
+  const uint16_t yellow = d.color565(240, 210, 90);
+  const uint16_t red    = d.color565(235, 110, 90);
+  const uint16_t bolt   = d.color565(255, 230, 120);
+
+  const int lvl = M5.Power.getBatteryLevel();          // 0-100。不明時は負値
+  const bool charging = (M5.Power.isCharging() == M5.Power.is_charging);
+
+  // ─── アイコン枠 + 端子 ───
+  d.drawRoundRect(kBatX, kBatY, kBatW, kBatH, 2, white);
+  d.fillRect(kBatX + kBatW, kBatY + (kBatH - kBatTipH) / 2, kBatTipW, kBatTipH, white);
+
+  // ─── 残量% テキスト (アイコン左に右詰め) ───
+  char buf[8];
+  if (lvl < 0 || lvl > 100) {
+    snprintf(buf, sizeof(buf), "--");
+  } else {
+    snprintf(buf, sizeof(buf), "%d%%", lvl);
+  }
+  d.setTextColor(white, bg);
+  d.setTextSize(2);
+  d.setTextDatum(textdatum_t::top_right);
+  d.drawString(buf, kBatX - 6, kBatY - 1);
+
+  // ─── 枠内の残量バー (残量に応じて緑/黄/赤) ───
+  if (lvl >= 0 && lvl <= 100) {
+    const uint16_t fill_c = (lvl > 50) ? green : (lvl >= 20 ? yellow : red);
+    const int inner_x = kBatX + 2, inner_y = kBatY + 2;
+    const int inner_w = kBatW - 4, inner_h = kBatH - 4;
+    d.fillRect(inner_x, inner_y, inner_w, inner_h, panel);  // 残量背景をクリア
+    const int fill_w = inner_w * lvl / 100;
+    if (fill_w > 0) d.fillRect(inner_x, inner_y, fill_w, inner_h, fill_c);
+  }
+
+  // ─── 充電中マーク (フォントに ⚡ が無いため fillTriangle で稲妻を描く) ───
+  if (charging) {
+    const int cx = kBatX + kBatW / 2;
+    const int cy = kBatY + kBatH / 2;
+    d.fillTriangle(cx + 2, kBatY + 2, cx - 3, cy + 1, cx + 1, cy, bolt);
+    d.fillTriangle(cx - 2, kBatY + kBatH - 2, cx + 3, cy - 1, cx - 1, cy, bolt);
+  }
 }
 
 void draw_ui() {
@@ -95,19 +149,22 @@ void draw_ui() {
 
   d.fillScreen(bg);
 
+  // タイトルは左上へ。右上は電池表示に明け渡し、上端での重なりを避ける。
   d.setTextColor(white, bg);
   d.setTextSize(2);
-  d.setTextDatum(textdatum_t::top_center);
-  d.drawString("VOLUME", d.width() / 2, 22);
+  d.setTextDatum(textdatum_t::top_left);
+  d.drawString("VOLUME", 12, 7);
 
-  // 現在値 (%) を大きく表示
+  draw_battery();  // 右上に電池残量
+
+  // 現在値 (%) を表示
   const int pct = static_cast<int>(
       static_cast<long>(s_volume - kVolMin) * 100 / (kVolMax - kVolMin));
   char buf[8];
   snprintf(buf, sizeof(buf), "%d%%", pct);
-  d.setTextSize(4);
+  d.setTextSize(3);
   d.setTextDatum(textdatum_t::middle_center);
-  d.drawString(buf, d.width() / 2, 66);
+  d.drawString(buf, d.width() / 2, 64);
 
   // 音量バー
   const int fill = static_cast<int>(
