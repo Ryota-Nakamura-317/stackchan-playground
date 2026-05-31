@@ -54,6 +54,11 @@ constexpr size_t   AQ_PCM_BUF_SAMPLES = 32 * 1024;   // 約 4 秒 @ 8kHz
 Avatar avatar;
 WebServer server(80);
 
+// 起動時に吹き出しへ出す IP は、確認用に数秒だけ表示して自動で消す。
+constexpr uint32_t kIpBalloonMs = 5000;
+uint32_t s_ip_shown_at_ms    = 0;
+bool     s_ip_balloon_active = false;
+
 uint32_t aq_workbuf[AQ_SIZE_WORKBUF];
 int16_t* pcm_buf = nullptr;
 
@@ -117,6 +122,8 @@ void connectWiFi() {
   Serial.println();
   Serial.printf("[wifi] connected. IP=%s\n", WiFi.localIP().toString().c_str());
   avatar.setSpeechText(WiFi.localIP().toString().c_str());
+  s_ip_shown_at_ms    = millis();
+  s_ip_balloon_active = true;
 }
 
 void startMdns() {
@@ -246,6 +253,11 @@ void loop() {
   // UI 表示中は Avatar 描画タスクが止まっており、setExpression() を呼ぶ他モジュールを
   // 走らせると不正タスクハンドルに触れる。UI が閉じている間だけ tick する。
   if (!volume_control::is_active()) {
+    // 起動時の IP 吹き出しを数秒で自動クリア (UI 表示中は Avatar タスクが止まっているので除外)
+    if (s_ip_balloon_active && millis() - s_ip_shown_at_ms > kIpBalloonMs) {
+      avatar.setSpeechText("");
+      s_ip_balloon_active = false;
+    }
     sleep_manager::tick(millis());
     idle_motion::tick(millis());
     pet_reaction::tick(millis());
