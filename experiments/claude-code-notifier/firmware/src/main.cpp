@@ -59,6 +59,13 @@ constexpr uint32_t kIpBalloonMs = 5000;
 uint32_t s_ip_shown_at_ms    = 0;
 bool     s_ip_balloon_active = false;
 
+// WiFi 切断監視。setAutoReconnect() によるドライバレベルの自動再接続に任せ、
+// ここでは「復帰を検知したら mDNS を張り直す」ことだけを行う
+// (ESP32 の mDNS は WiFi ドロップで止まったままになることがあるため)。
+constexpr uint32_t kWifiCheckIntervalMs = 5000;
+uint32_t s_wifi_checked_at_ms = 0;
+bool     s_wifi_was_down      = false;
+
 uint32_t aq_workbuf[AQ_SIZE_WORKBUF];
 int16_t* pcm_buf = nullptr;
 
@@ -108,6 +115,9 @@ void speakPhonemes(const char* koe) {
 void connectWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(MDNS_HOSTNAME);
+  // AP 再起動・電波瞬断からドライバレベルで自動復帰させる。
+  // これが無いと一度切断されたら HTTP サーバが応答不能のまま放置される。
+  WiFi.setAutoReconnect(true);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.print("[wifi] connecting");
   unsigned long start = millis();
@@ -132,6 +142,34 @@ void startMdns() {
     Serial.printf("[mdns] %s.local advertised\n", MDNS_HOSTNAME);
   } else {
     Serial.println("[mdns] begin failed");
+  }
+}
+
+// WiFi の切断/復帰を定期監視する。再接続そのものは setAutoReconnect() に
+// 任せ、復帰検知時に mDNS の再広告と IP 吹き出しの再表示だけ行う。
+void tickWifiWatch(uint32_t now_ms) {
+  if (now_ms - s_wifi_checked_at_ms < kWifiCheckIntervalMs) return;
+  s_wifi_checked_at_ms = now_ms;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    if (!s_wifi_was_down) {
+      s_wifi_was_down = true;
+      Serial.println("[wifi] disconnected, waiting for auto-reconnect");
+    }
+    return;
+  }
+  if (s_wifi_was_down) {
+    s_wifi_was_down = false;
+    Serial.printf("[wifi] reconnected. IP=%s\n", WiFi.localIP().toString().c_str());
+    MDNS.end();
+    startMdns();
+    // 再接続で IP が変わった可能性があるので吹き出しで再表示する。
+    // Avatar 描画タスクが止まっている音量 UI 表示中は触らない。
+    if (!volume_control::is_active()) {
+      avatar.setSpeechText(WiFi.localIP().toString().c_str());
+      s_ip_shown_at_ms    = now_ms;
+      s_ip_balloon_active = true;
+    }
   }
 }
 
@@ -249,6 +287,7 @@ void setup() {
 void loop() {
   M5StackChan.update();
   server.handleClient();
+  tickWifiWatch(millis());
   volume_control::tick(millis());
   // UI 表示中は Avatar 描画タスクが止まっており、setExpression() を呼ぶ他モジュールを
   // 走らせると不正タスクハンドルに触れる。UI が閉じている間だけ tick する。

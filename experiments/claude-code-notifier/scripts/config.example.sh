@@ -5,14 +5,17 @@
 
 # Stack-Chan のホスト名 or IP アドレス。
 #
-# firmware は mDNS で "stackchan.local" を公開しているが、macOS の curl は
-# .local の名前解決に 3〜5 秒かかることが多く、Stop hook の疎通確認(3 秒)
-# を頻繁にタイムアウトさせる。実用上は **IP 直書きが推奨**。
+# notify_stackchan.sh は「前回成功 IP のキャッシュ → mDNS → ARP (MAC 検索)」
+# の3層で IP を解決するので、mDNS 名のままで OK。IP 直書きも可 (その場合も
+# キャッシュ・ARP フォールバックは働く)。
 #
-# Stack-Chan の IP は起動時のシリアル出力(`[wifi] connected. IP=...`)か
-# LCD 画面右下に表示される。家庭用ルータなら通常 DHCP リース期間中は固定。
-#
-#   export STACKCHAN_HOST="192.168.1.123"
-#
-# mDNS で問題なく解決できる環境ならデフォルトのままでも動く。
+# 補足: macOS で .local 名が遅いのは AAAA (IPv6) クエリの 5 秒タイムアウトが
+# 原因。スクリプト内の curl は --ipv4 を付けているので mDNS 名でも速い。
 export STACKCHAN_HOST="stackchan.local"
+
+# Stack-Chan の MAC アドレス (小文字コロン区切り)。
+# DHCP で IP が変わっても ARP テーブル / ping スイープから機体を特定する
+# 最後の砦として使う。空だと ARP フォールバックと自己修復が無効になる。
+# 確認方法: 起動時シリアル出力、またはルータの DHCP クライアント一覧。
+#   export STACKCHAN_MAC="aa:bb:cc:dd:ee:ff"
+export STACKCHAN_MAC=""

@@ -2,7 +2,7 @@
 
 Claude Code のセッション完了 (`Stop` hook) や、ユーザー操作待ち (`Notification` hook の `permission_prompt` / `elicitation_dialog`) が発生したときに、**Stack-Chan が日本語で発話して知らせる** 仕掛け。
 
-Stack-Chan が同一 LAN に居ないときは `afplay /System/Library/Sounds/Ping.aiff` に自動でフォールバックするので、外出先や Stack-Chan の電源 OFF 時でも通知は失われません。
+Stack-Chan の IP は「前回成功 IP のキャッシュ → mDNS → ARP (MAC 検索)」の3層で自動解決するため、**DHCP で IP が変わっても設定変更なしで追従**します。全層で見つからないときは発話をスキップし(通知音はバナー側に一本化)、バックグラウンドで LAN を再探索して次回までに自己修復します。
 
 ## 対象ハードウェア
 
@@ -46,9 +46,13 @@ Claude Code (Mac)
   └─ Notification hook ─┴─→ scripts/notify_stackchan.sh <event>
                               ├─ stdin の hook JSON から message を抽出
                               ├─ event / message → 発話 kind を決定
-                              ├─ curl /healthz で Stack-Chan の疎通確認 (3 秒)
-                              ├─ 応答あり → POST /speak (バックグラウンド)
-                              └─ 応答なし → afplay Ping.aiff にフォールバック
+                              ├─ IP を3層で解決 (すべて curl は --ipv4 付き)
+                              │    1. ~/.cache/stackchan/last_ip (前回成功 IP)
+                              │    2. mDNS: ping -c1 stackchan.local (~0.1 秒)
+                              │    3. ARP テーブルから STACKCHAN_MAC を検索
+                              ├─ 解決成功 → POST /speak (バックグラウンド) + IP をキャッシュ
+                              └─ 全滅 → 発話スキップ + rediscover_stackchan.sh を
+                                 デタッチ起動 (ping スイープ → ARP → キャッシュ自己修復)
 
 Stack-Chan (CoreS3)
   ├─ Wi-Fi STA + mDNS (stackchan.local を公開)
@@ -68,9 +72,9 @@ Stack-Chan (CoreS3)
 本実験は記事に対して以下を拡張しています:
 
 - `Notification` hook も拾う(作業完了だけでなく権限プロンプトも喋る)
-- Stack-Chan 不在時の `afplay` フォールバック
+- IP の3層自動解決(キャッシュ → mDNS → ARP)+ 不達時のバックグラウンド自己修復。DHCP で IP が変わっても設定変更不要
 - 発話文言は kind ごとに firmware 側に焼き込み、ASCII の AquesTalk 音素記号列で記述(評価版でナ行・マ行が「ヌ」化する制限を回避するため N/M を含まない文に統一)
-- mDNS (`stackchan.local`) も公開していますが、macOS の curl は `.local` 解決に 3〜5 秒かかることが多いため、Stop hook のような短時間制約のあるスクリプトでは `config.local.sh` を **IP 直書きで運用するのを推奨** しています
+- mDNS (`stackchan.local`) の名前解決は **`curl --ipv4` 必須**。macOS の `.local` 解決が 3〜5 秒かかる正体は AAAA (IPv6) クエリのタイムアウト待ちで(ESP32 は AAAA に応答しない)、A レコードだけなら数 ms で返る。`--ipv4` を付ければ mDNS 名運用で問題ない
 
 ## 必要なもの
 
@@ -127,13 +131,13 @@ cp firmware/include/secrets.example.h firmware/include/secrets.h
 ```bash
 cd experiments/claude-code-notifier/scripts
 cp config.example.sh config.local.sh
-# config.local.sh を編集し、シリアル起動ログに出た IP を書く。
-#   export STACKCHAN_HOST="192.168.x.y"
-# (デフォルトは "stackchan.local" だが、macOS の curl は mDNS 解決に
-#  3〜5 秒かかることがあり、Stop hook では IP 直の方が確実)
+# config.local.sh を編集:
+#   STACKCHAN_HOST … 既定の "stackchan.local" のままで OK (IP 直書きも可)
+#   STACKCHAN_MAC  … Stack-Chan の MAC アドレスを書く (ARP フォールバック用)。
+#                    起動時シリアル出力かルータの DHCP クライアント一覧で確認
 ```
 
-`config.local.sh` も `.gitignore` 対象です。
+`config.local.sh` も `.gitignore` 対象です。IP は「キャッシュ → mDNS → ARP」で自動解決されるため、DHCP で変わっても書き換え不要です。
 
 ### 6. Claude Code の hook 設定
 
@@ -174,10 +178,11 @@ cp config.example.sh config.local.sh
 
 ### 手動 curl テスト
 
-`STACKCHAN_HOST` は Stack-Chan の IP (起動時のシリアル / 画面に表示) を入れて実行してください。`stackchan.local` でも届く環境なら置き換え可。
+`HOST` は `stackchan.local` のままで OK(**`--ipv4` を忘れずに**。付けないと AAAA クエリ待ちで 5 秒かかる)。IP 直書きでも可。
 
 ```bash
-HOST=192.168.x.y   # 自分の Stack-Chan の IP に置き換え
+HOST=stackchan.local
+alias curl='curl --ipv4'   # このテスト中だけ。スクリプト内の curl は常に --ipv4 付き
 
 # 疎通確認(スクリプトのフォールバック判定にも使われる)
 curl -s http://$HOST/healthz
@@ -211,7 +216,8 @@ echo '{"hook_event_name":"Stop"}' | scripts/notify_stackchan.sh stop
 echo '{"hook_event_name":"Notification","message":"Claude needs your permission to use Bash"}' \
   | scripts/notify_stackchan.sh notification
 
-# Stack-Chan の電源を切って同じコマンドを実行 → afplay の Ping が鳴ること
+# Stack-Chan の電源を切って同じコマンドを実行 → 無音のままログに
+# reason=unreachable が記録され、rediscover がバックグラウンド起動すること
 ```
 
 ログは `/tmp/stackchan_notify.log` に追記されます。`tail -f /tmp/stackchan_notify.log` で発火状況を確認できます。
@@ -222,7 +228,7 @@ echo '{"hook_event_name":"Notification","message":"Claude needs your permission 
 
 - 簡単な依頼(例: `echo hi` 実行)→ 完了時に Stack-Chan が「sa'gyou shu'uryou.」(作業終了)を発話
 - 普段拒否設定のコマンドを依頼して権限プロンプトを発生させる → 「kyo'ka kuda'sai.」(許可ください)
-- Stack-Chan の電源を切って同じ操作 → Ping 音にフォールバック
+- Stack-Chan の電源を切って同じ操作 → 無音(ログに `reason=unreachable`)。バナー通知音のみ
 
 ## 待機中の首振り (idle motion)
 
@@ -346,14 +352,15 @@ BSP の `examples/Servo/HomeCalibration/HomeCalibration.ino` を一旦焼いて�
 | `Error: Could not open port` | USB ケーブルがデータ通信対応か / 他アプリが占有していないか |
 | `Failed uploading: timeout` | `upload_speed` を `921600` や `460800` に下げる |
 | Stack-Chan の画面に IP が出ない | `WIFI_SSID` / `WIFI_PASS` のスペル、2.4GHz の AP か(5GHz だと ESP32 不可) |
-| `stackchan.local` が引けない / curl がタイムアウトする | macOS の curl は mDNS 解決に 3〜5 秒かかることが多い。`config.local.sh` の `STACKCHAN_HOST` を IP 直書きにする(推奨) |
+| `stackchan.local` の curl が 5 秒かかる / タイムアウトする | `--ipv4` を付け忘れている。遅さの正体は AAAA (IPv6) クエリのタイムアウト待ち(ESP32 は AAAA に応答しない)。A レコード単独なら数 ms |
+| 発話しない(ログが全行 `reason=unreachable`) | ① Stack-Chan の電源(アイドル 30 分で自動 powerOff する)② `tail /tmp/stackchan_notify.log` に `rediscover=ok ip=...` があれば次回から復旧済み ③ `STACKCHAN_MAC` が正しいか |
 | `Operation not permitted` で curl が即時失敗 | macOS Sequoia 以降のローカルネットワーク権限。システム設定 → プライバシーとセキュリティ → ローカルネットワーク → Terminal / iTerm を ON |
 | `/speak` で音が出ない | `firmware/lib/AquesTalkTTS/src/libaquestalk.a` が esp32s3 用か、CoreS3 のスピーカー音量が 0 になっていないか、AquesTalk が Ver.2.4.2 以上か。シリアルに `[tts] SetKoe err=105` が出ていたら `mode:free` で UTF-8 を渡している(ASCII の音素記号列が必要) |
 | `/speak` が即 200 を返すのに無音 (`time_total` ~0.1s) | 音素記号列が AquesTalk に弾かれて `SetKoe` がエラー(シリアルに `[tts] SetKoe err=N`)→ `speakPhonemes()` が即 return。**文末 `!` が代表的な原因**。`.` / `?` / 記号なしに直す(上の **発話文言を変えたい** 参照) |
 | 首が動かない | シリアルに `Servo ID: 1 get zero pos: ...` が出ていない → BSP の `M5StackChan.begin()` 内で PY32 IO Expander init がタイムアウトしている可能性。バッテリーの残量、CoreS3 とボディの結合、サーボコネクタを確認 |
 | 首が傾いている | `examples/Servo/HomeCalibration` (BSP 同梱) で再キャリブレーション。詳細は **待機中の首振り (idle motion)** セクション参照 |
 | 音は出るが「ヌヌヌ」 | 評価版の制限が出ている。固定文は kind ごとにナ行・マ行(N/M)を含まない設計なので発生しないはず。自由文(`mode:free`)で発生するなら製品版を購入 |
-| hook が動かない | `chmod +x scripts/notify_stackchan.sh` 済みか、`~/.claude/settings.json` の `command` が絶対パスか、`scripts/config.local.sh` の `STACKCHAN_HOST` が正しいか |
+| hook が動かない | `chmod +x scripts/notify_stackchan.sh scripts/rediscover_stackchan.sh` 済みか、`~/.claude/settings.json` の `command` が絶対パスか、`scripts/config.local.sh` の `STACKCHAN_MAC` が正しいか |
 | 二重に発話される | リポジトリ内 `.claude/settings.local.json` にも旧 hook が残っていないか確認 |
 
 ## 発話文言を変えたい
@@ -367,4 +374,4 @@ BSP の `examples/Servo/HomeCalibration/HomeCalibration.ino` を一旦焼いて�
 
 - **サーボの高度な動作**: 待機中ランダム首振りと、頭を撫でられた時の喜び表現 (表情 + LED) は実装済み (**待機中の首振り (idle motion)** / **頭を撫でられたら喜ぶ (pet reaction)** 参照)。発話と同期したうなずきや、撫でられた時のサーボでの反応モーションは未実装。BSP の `M5StackChan.Motion.move()` をイベントに合わせて呼ぶ等で拡張可能。
 - **複数 Stack-Chan への同報**: 単機運用なら HTTP 直叩きで十分。複数機なら MQTT ブローカ経由が候補。
-- **出張先での通知**: 現状フォールバックは `afplay` のみ。`say -v Kyoko` 等への切り替えは `notify_stackchan.sh` の `play_fallback` 関数を編集。
+- **出張先での通知**: 現状 Stack-Chan 不達時は無音(通知音はバナー側に一本化)。`say -v Kyoko` 等で Mac に喋らせたい場合は `notify_stackchan.sh` の unreachable 分岐に追加。
