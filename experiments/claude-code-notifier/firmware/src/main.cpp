@@ -59,12 +59,18 @@ constexpr uint32_t kIpBalloonMs = 5000;
 uint32_t s_ip_shown_at_ms    = 0;
 bool     s_ip_balloon_active = false;
 
-// WiFi 切断監視。setAutoReconnect() によるドライバレベルの自動再接続に任せ、
-// ここでは「復帰を検知したら mDNS を張り直す」ことだけを行う
+// WiFi 切断監視。通常はドライバの自動再接続で復帰し、ここでは
+// 「復帰を検知したら mDNS を張り直す」ことを行う
 // (ESP32 の mDNS は WiFi ドロップで止まったままになることがあるため)。
+// 自動再接続が働かない切断理由 (AUTH_FAIL 等) に備えて、切断が続く間は
+// 30 秒ごとに WiFi.reconnect() を打ち直し、5 分復帰しなければ再起動する。
 constexpr uint32_t kWifiCheckIntervalMs = 5000;
+constexpr uint32_t kWifiKickIntervalMs = 30UL * 1000UL;        // WiFi.reconnect() を打ち直す間隔
+constexpr uint32_t kWifiRestartAfterMs = 5UL * 60UL * 1000UL;  // 最終手段の ESP.restart()
 uint32_t s_wifi_checked_at_ms = 0;
 bool     s_wifi_was_down      = false;
+uint32_t s_wifi_down_since_ms = 0;
+uint32_t s_wifi_kicked_at_ms  = 0;
 
 uint32_t aq_workbuf[AQ_SIZE_WORKBUF];
 int16_t* pcm_buf = nullptr;
@@ -112,11 +118,21 @@ void speakPhonemes(const char* koe) {
   }
 }
 
+// IP を吹き出しで数秒表示する (起動時と WiFi 再接続時の共通処理)。
+// Avatar 描画タスクが止まっている音量 UI 表示中は触らない。
+void showIpBalloon(uint32_t now_ms) {
+  if (volume_control::is_active()) return;
+  avatar.setSpeechText(WiFi.localIP().toString().c_str());
+  s_ip_shown_at_ms    = now_ms;
+  s_ip_balloon_active = true;
+}
+
 void connectWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(MDNS_HOSTNAME);
-  // AP 再起動・電波瞬断からドライバレベルで自動復帰させる。
-  // これが無いと一度切断されたら HTTP サーバが応答不能のまま放置される。
+  // arduino-esp32 ではデフォルト有効だが、意図を明示するために設定しておく。
+  // ただし AUTH_FAIL 等の再接続対象外の切断理由では働かないため、
+  // tickWifiWatch() の段階的エスカレーションで補う。
   WiFi.setAutoReconnect(true);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.print("[wifi] connecting");
@@ -131,9 +147,7 @@ void connectWiFi() {
   }
   Serial.println();
   Serial.printf("[wifi] connected. IP=%s\n", WiFi.localIP().toString().c_str());
-  avatar.setSpeechText(WiFi.localIP().toString().c_str());
-  s_ip_shown_at_ms    = millis();
-  s_ip_balloon_active = true;
+  showIpBalloon(millis());
 }
 
 void startMdns() {
@@ -145,16 +159,29 @@ void startMdns() {
   }
 }
 
-// WiFi の切断/復帰を定期監視する。再接続そのものは setAutoReconnect() に
-// 任せ、復帰検知時に mDNS の再広告と IP 吹き出しの再表示だけ行う。
+// WiFi の切断/復帰を定期監視する。通常はドライバの自動再接続で復帰するが、
+// 働かない切断理由に備えて reconnect の打ち直しと最終手段の再起動で
+// 段階的にエスカレーションする。復帰検知時は mDNS の再広告と
+// IP 吹き出しの再表示を行う。
 void tickWifiWatch(uint32_t now_ms) {
   if (now_ms - s_wifi_checked_at_ms < kWifiCheckIntervalMs) return;
   s_wifi_checked_at_ms = now_ms;
 
   if (WiFi.status() != WL_CONNECTED) {
     if (!s_wifi_was_down) {
-      s_wifi_was_down = true;
+      s_wifi_was_down       = true;
+      s_wifi_down_since_ms  = now_ms;
+      s_wifi_kicked_at_ms   = now_ms;
       Serial.println("[wifi] disconnected, waiting for auto-reconnect");
+    } else if (now_ms - s_wifi_down_since_ms >= kWifiRestartAfterMs) {
+      // 5 分粘っても復帰しないなら再起動で仕切り直す。
+      Serial.println("[wifi] down too long, restarting");
+      ESP.restart();
+    } else if (now_ms - s_wifi_kicked_at_ms >= kWifiKickIntervalMs) {
+      // AUTH_FAIL 等では自動再接続が働かないため、明示的に打ち直す。
+      s_wifi_kicked_at_ms = now_ms;
+      Serial.println("[wifi] still down, kicking reconnect");
+      WiFi.reconnect();
     }
     return;
   }
@@ -164,12 +191,7 @@ void tickWifiWatch(uint32_t now_ms) {
     MDNS.end();
     startMdns();
     // 再接続で IP が変わった可能性があるので吹き出しで再表示する。
-    // Avatar 描画タスクが止まっている音量 UI 表示中は触らない。
-    if (!volume_control::is_active()) {
-      avatar.setSpeechText(WiFi.localIP().toString().c_str());
-      s_ip_shown_at_ms    = now_ms;
-      s_ip_balloon_active = true;
-    }
+    showIpBalloon(now_ms);
   }
 }
 

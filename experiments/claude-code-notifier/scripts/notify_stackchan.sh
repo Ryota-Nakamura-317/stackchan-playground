@@ -5,6 +5,7 @@
 # 動作:
 #   1. stdin の hook JSON を読み、Notification なら message から kind を推定
 #   2. Stack-Chan の IP を3層で解決 (キャッシュ → mDNS → ARP)。詳細は resolve_ip()
+#      (各層の /healthz 疎通確認は 3 秒タイムアウト。同一 IP は再 probe しない)
 #   3. 解決できたら POST /speak をバックグラウンドで投げ、成功 IP をキャッシュ
 #   4. 全滅なら何もしない(音は鳴らさない。通知音はバナー側の Glass に一本化)。
 #      代わりに rediscover_stackchan.sh をデタッチ起動し、次回 hook までに
@@ -19,26 +20,9 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_FILE="/tmp/stackchan_notify.log"
-CACHE_DIR="${HOME}/.cache/stackchan"
-CACHE_FILE="${CACHE_DIR}/last_ip"
-
-# ローカル設定(gitignore対象)。STACKCHAN_HOST / STACKCHAN_MAC を定義。
-# env で渡された値を優先するため、source 前後で env の値を保存・復元する。
-_ENV_STACKCHAN_HOST="${STACKCHAN_HOST:-}"
-_ENV_STACKCHAN_MAC="${STACKCHAN_MAC:-}"
-if [[ -f "${SCRIPT_DIR}/config.local.sh" ]]; then
-  # shellcheck source=/dev/null
-  source "${SCRIPT_DIR}/config.local.sh"
-fi
-if [[ -n "${_ENV_STACKCHAN_HOST}" ]]; then
-  STACKCHAN_HOST="${_ENV_STACKCHAN_HOST}"
-fi
-if [[ -n "${_ENV_STACKCHAN_MAC}" ]]; then
-  STACKCHAN_MAC="${_ENV_STACKCHAN_MAC}"
-fi
-STACKCHAN_HOST="${STACKCHAN_HOST:-stackchan.local}"
-STACKCHAN_MAC="${STACKCHAN_MAC:-}"
+# shellcheck source=lib_stackchan.sh
+source "${SCRIPT_DIR}/lib_stackchan.sh"
+load_config
 
 EVENT="${1:-stop}"
 
@@ -70,9 +54,9 @@ case "${EVENT}" in
 esac
 
 # healthz が返れば生きている機体。発話中はファーム側の loop が約 2 秒
-# ブロックして応答が遅れるため、タイムアウトは 2 秒とる。
+# ブロックして応答が遅れるため、1 秒のマージンを持たせてタイムアウトは 3 秒とる。
 probe() {
-  curl -fsS --ipv4 --max-time 2 "http://$1/healthz" >/dev/null 2>&1
+  curl -fsS --ipv4 --max-time 3 "http://$1/healthz" >/dev/null 2>&1
 }
 
 # ホスト名/IP を ping 1発で IPv4 に解決する (実測 ~0.1 秒)。
@@ -82,46 +66,30 @@ ping_resolve() {
     sed -n 's/^PING [^ ]* (\([0-9.][0-9.]*\)).*/\1/p' | head -1
 }
 
-# ARP テーブルから Stack-Chan の MAC を探して IP を得る (実測 ~10ms)。
-# エントリが expire していると空振りするが、その場合は rediscover 側の
-# ping スイープが次回までに埋める。
-arp_resolve() {
-  [[ -n "${STACKCHAN_MAC}" ]] || return 0
-  arp -an 2>/dev/null | grep -i "${STACKCHAN_MAC}" |
-    sed -n 's/.*(\([0-9.][0-9.]*\)).*/\1/p' | head -1
-}
-
 # 3層で IP を解決する。stdout に「IP 経路名」を出す (例: "192.168.0.15 cache")。
+# 一度 probe に失敗した IP は後段レイヤで再 probe しない (各層が同じ IP に
+# 解決されると probe タイムアウトが積み重なるため)。
 resolve_ip() {
-  local ip
+  local tried=""
+  # $1=IP $2=経路名。未 probe の IP なら probe し、成功なら "IP 経路名" を出力
+  try_ip() {
+    [[ -n "$1" ]] || return 1
+    case " ${tried} " in *" $1 "*) return 1 ;; esac
+    tried="${tried} $1"
+    probe "$1" && { echo "$1 $2"; return 0; }
+    return 1
+  }
 
   # 1) 前回成功した IP (名前解決コストゼロ)
   if [[ -r "${CACHE_FILE}" ]]; then
-    ip="$(<"${CACHE_FILE}")"
-    if [[ -n "${ip}" ]] && probe "${ip}"; then
-      echo "${ip} cache"
-      return 0
-    fi
+    try_ip "$(<"${CACHE_FILE}")" cache && return 0
   fi
-
   # 2) mDNS (STACKCHAN_HOST が IP 直書きでも ping はそのまま通る)
-  ip="$(ping_resolve "${STACKCHAN_HOST}")"
-  if [[ -n "${ip}" ]] && probe "${ip}"; then
-    echo "${ip} mdns"
-    return 0
-  fi
-
+  try_ip "$(ping_resolve "${STACKCHAN_HOST}")" mdns && return 0
   # 3) ARP テーブルの MAC 検索 (mDNS が死んでいても LAN に居れば拾える)
-  ip="$(arp_resolve)"
-  if [[ -n "${ip}" ]] && probe "${ip}"; then
-    echo "${ip} arp"
-    return 0
-  fi
-
+  try_ip "$(arp_resolve)" arp && return 0
   return 1
 }
-
-ts="$(date -Iseconds)"
 
 if resolved="$(resolve_ip)"; then
   ip="${resolved%% *}"
@@ -138,10 +106,10 @@ if resolved="$(resolve_ip)"; then
     else
       status="speak-fail"
     fi
-    echo "${ts} event=${EVENT} kind=${KIND} host=${ip} via=${via} status=${status}" >> "${LOG_FILE}"
+    echo "$(date -Iseconds) event=${EVENT} kind=${KIND} host=${ip} via=${via} status=${status}" >> "${LOG_FILE}"
   } &
 else
-  echo "${ts} event=${EVENT} kind=${KIND} host=${STACKCHAN_HOST} fallback=none reason=unreachable" >> "${LOG_FILE}"
+  echo "$(date -Iseconds) event=${EVENT} kind=${KIND} host=${STACKCHAN_HOST} fallback=none reason=unreachable" >> "${LOG_FILE}"
   # 今回の通知は諦め、次回に備えてバックグラウンドで IP を再探索する
   if [[ -x "${SCRIPT_DIR}/rediscover_stackchan.sh" ]]; then
     nohup "${SCRIPT_DIR}/rediscover_stackchan.sh" >/dev/null 2>&1 &

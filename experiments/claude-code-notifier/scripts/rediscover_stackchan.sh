@@ -13,23 +13,25 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_FILE="/tmp/stackchan_notify.log"
-CACHE_DIR="${HOME}/.cache/stackchan"
-CACHE_FILE="${CACHE_DIR}/last_ip"
+# shellcheck source=lib_stackchan.sh
+source "${SCRIPT_DIR}/lib_stackchan.sh"
+load_config
 LOCK_DIR="${CACHE_DIR}/rediscover.lock"
 
-if [[ -f "${SCRIPT_DIR}/config.local.sh" ]]; then
-  # shellcheck source=/dev/null
-  source "${SCRIPT_DIR}/config.local.sh"
-fi
-STACKCHAN_MAC="${STACKCHAN_MAC:-}"
 if [[ -z "${STACKCHAN_MAC}" ]]; then
   exit 0
 fi
 
 mkdir -p "${CACHE_DIR}"
 if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
-  exit 0  # 別の rediscover が走行中
+  # 正常な rediscover は数秒で終わる。10 分より古いロックは異常終了
+  # (SIGKILL やシャットダウンで EXIT trap が走らなかった) の残骸とみなす。
+  if find "${LOCK_DIR}" -maxdepth 0 -mmin +10 2>/dev/null | grep -q .; then
+    rmdir "${LOCK_DIR}" 2>/dev/null || true
+    mkdir "${LOCK_DIR}" 2>/dev/null || exit 0
+  else
+    exit 0  # 別の rediscover が走行中
+  fi
 fi
 trap 'rmdir "${LOCK_DIR}" 2>/dev/null' EXIT
 
@@ -48,8 +50,7 @@ for i in $(seq 1 254); do
 done
 wait
 
-ip="$(arp -an 2>/dev/null | grep -i "${STACKCHAN_MAC}" |
-      sed -n 's/.*(\([0-9.][0-9.]*\)).*/\1/p' | head -1)"
+ip="$(arp_resolve)"
 
 ts="$(date -Iseconds)"
 if [[ -n "${ip}" ]] && curl -fsS --ipv4 --max-time 2 "http://${ip}/healthz" >/dev/null 2>&1; then
