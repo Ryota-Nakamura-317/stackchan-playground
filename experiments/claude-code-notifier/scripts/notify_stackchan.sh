@@ -4,7 +4,8 @@
 #
 # 動作:
 #   1. stdin の hook JSON を読み、Notification なら message から kind を推定
-#   2. Stack-Chan の IP を3層で解決 (キャッシュ → mDNS → ARP)。詳細は resolve_ip()
+#   2. Stack-Chan の IP を3層で解決 (キャッシュ → mDNS → ARP)。
+#      詳細は lib_stackchan.sh の resolve_ip()
 #      (各層の /healthz 疎通確認は 3 秒タイムアウト。同一 IP は再 probe しない)
 #   3. 解決できたら POST /speak をバックグラウンドで投げ、成功 IP をキャッシュ
 #   4. 全滅なら何もしない(音は鳴らさない。通知音はバナー側の Glass に一本化)。
@@ -53,44 +54,7 @@ case "${EVENT}" in
     ;;
 esac
 
-# healthz が返れば生きている機体。発話中はファーム側の loop が約 2 秒
-# ブロックして応答が遅れるため、1 秒のマージンを持たせてタイムアウトは 3 秒とる。
-probe() {
-  curl -fsS --ipv4 --max-time 3 "http://$1/healthz" >/dev/null 2>&1
-}
-
-# ホスト名/IP を ping 1発で IPv4 に解決する (実測 ~0.1 秒)。
-# mDNS 名でも AAAA を引かないので速い。副作用で ARP エントリも温まる。
-ping_resolve() {
-  ping -c1 -W 700 "$1" 2>/dev/null |
-    sed -n 's/^PING [^ ]* (\([0-9.][0-9.]*\)).*/\1/p' | head -1
-}
-
-# 3層で IP を解決する。stdout に「IP 経路名」を出す (例: "192.168.0.15 cache")。
-# 一度 probe に失敗した IP は後段レイヤで再 probe しない (各層が同じ IP に
-# 解決されると probe タイムアウトが積み重なるため)。
-resolve_ip() {
-  local tried=""
-  # $1=IP $2=経路名。未 probe の IP なら probe し、成功なら "IP 経路名" を出力
-  try_ip() {
-    [[ -n "$1" ]] || return 1
-    case " ${tried} " in *" $1 "*) return 1 ;; esac
-    tried="${tried} $1"
-    probe "$1" && { echo "$1 $2"; return 0; }
-    return 1
-  }
-
-  # 1) 前回成功した IP (名前解決コストゼロ)
-  if [[ -r "${CACHE_FILE}" ]]; then
-    try_ip "$(<"${CACHE_FILE}")" cache && return 0
-  fi
-  # 2) mDNS (STACKCHAN_HOST が IP 直書きでも ping はそのまま通る)
-  try_ip "$(ping_resolve "${STACKCHAN_HOST}")" mdns && return 0
-  # 3) ARP テーブルの MAC 検索 (mDNS が死んでいても LAN に居れば拾える)
-  try_ip "$(arp_resolve)" arp && return 0
-  return 1
-}
-
+# IP 解決 (resolve_ip / probe / ping_resolve) は lib_stackchan.sh に集約
 if resolved="$(resolve_ip)"; then
   ip="${resolved%% *}"
   via="${resolved##* }"

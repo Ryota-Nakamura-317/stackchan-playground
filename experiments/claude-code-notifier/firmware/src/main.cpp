@@ -15,6 +15,10 @@
 //     {"mode":"notify","kind":"idle"}    → MSG_IDLE を発話
 //     {"mode":"fixed","kind":"done"}     → notify と同じ扱い(後方互換)
 //     {"mode":"free","text":"オンソレツ"} → text を音素列として発話
+//   POST /ask      → 承認 UI を表示(X-Stackchan-Token ヘッダ必須)
+//     {"id":"...","title":"許可しますか?","detail":"Bash: git push origin main"}
+//   GET  /answer?id=... → 回答のショートポーリング(X-Stackchan-Token ヘッダ必須)
+//     {"state":"pending"} / {"state":"answered","answer":"allow|deny|pc"}
 
 #include <M5Unified.h>
 #include <M5StackChan.h>
@@ -33,6 +37,7 @@ extern "C" {
 #include "sleep_manager.h"
 #include "pet_reaction.h"
 #include "volume_control.h"
+#include "approval_ui.h"
 
 using namespace m5avatar;
 
@@ -91,7 +96,9 @@ const char* balloonForKind(const char* kind) {
   return "できたよ！";
 }
 
-void speakPhonemes(const char* koe) {
+// wait_done=false にすると再生完了待ちを省略できる (playRaw 自体は非同期なので
+// 待たなくても再生される)。/ask のように HTTP 応答を速く返したい呼び出し元が使う。
+void speakPhonemes(const char* koe, bool wait_done = true) {
   if (pcm_buf == nullptr) {
     Serial.println("[tts] pcm_buf not allocated");
     return;
@@ -113,15 +120,16 @@ void speakPhonemes(const char* koe) {
     }
   }
   M5.Speaker.playRaw(pcm_buf, total, 8000, false, 1, -1, true);
+  if (!wait_done) return;
   while (M5.Speaker.isPlaying()) {
     delay(10);
   }
 }
 
 // IP を吹き出しで数秒表示する (起動時と WiFi 再接続時の共通処理)。
-// Avatar 描画タスクが止まっている音量 UI 表示中は触らない。
+// Avatar 描画タスクが止まっている音量/承認 UI 表示中は触らない。
 void showIpBalloon(uint32_t now_ms) {
-  if (volume_control::is_active()) return;
+  if (volume_control::is_active() || approval_ui::is_active()) return;
   avatar.setSpeechText(WiFi.localIP().toString().c_str());
   s_ip_shown_at_ms    = now_ms;
   s_ip_balloon_active = true;
@@ -210,10 +218,10 @@ void handleHealthz() {
 }
 
 void handleSpeak() {
-  // 音量調整 UI 表示中は Avatar の描画タスクを止めているため、発話で
+  // 音量調整/承認 UI 表示中は Avatar の描画タスクを止めているため、発話で
   // setExpression() を呼ぶと不正タスクハンドルに触れる。ビジーとして弾く。
-  if (volume_control::is_active()) {
-    server.send(409, "text/plain", "busy (volume UI)\n");
+  if (volume_control::is_active() || approval_ui::is_active()) {
+    server.send(409, "text/plain", "busy (UI active)\n");
     return;
   }
   if (!server.hasArg("plain")) {
@@ -252,6 +260,98 @@ void handleSpeak() {
   avatar.setSpeechText("");
   idle_motion::set_enabled(true);
   server.send(200, "application/json", "{\"ok\":true}\n");
+}
+
+// /ask /answer 用の共有トークン検証。secrets.h の STACKCHAN_TOKEN と
+// X-Stackchan-Token ヘッダの一致を見る (LAN 前提なので定数時間比較まではしない)。
+// トークン未設定 (空文字) のときは誤って無認証のまま公開しないよう 503 で
+// 機能ごと無効化する。検証 NG 時はレスポンス送信済みで false を返す。
+bool checkApprovalToken() {
+  if (STACKCHAN_TOKEN[0] == '\0') {
+    server.send(503, "text/plain", "approval disabled (token not set)\n");
+    return false;
+  }
+  if (!server.hasHeader("X-Stackchan-Token") ||
+      server.header("X-Stackchan-Token") != STACKCHAN_TOKEN) {
+    server.send(401, "text/plain", "unauthorized\n");
+    return false;
+  }
+  return true;
+}
+
+// POST /ask — Claude Code の権限確認を承認 UI として画面に出す。
+// Mac 側フックスクリプトはこの後 GET /answer をショートポーリングして回答を取る。
+void handleAsk() {
+  if (!checkApprovalToken()) return;
+  // 音量 UI と描画が競合するためビジーで弾く (スクリプト側は PC フォールバック)
+  if (volume_control::is_active()) {
+    server.send(409, "text/plain", "busy (volume UI)\n");
+    return;
+  }
+  // 表示中の承認が既にあるなら、発話する前にここで弾く
+  if (approval_ui::is_active()) {
+    server.send(409, "text/plain", "busy (approval UI)\n");
+    return;
+  }
+  if (!server.hasArg("plain")) {
+    server.send(400, "text/plain", "missing body\n");
+    return;
+  }
+  JsonDocument doc;
+  if (deserializeJson(doc, server.arg("plain"))) {
+    server.send(400, "text/plain", "invalid json\n");
+    return;
+  }
+  const char* id = doc["id"] | static_cast<const char*>(nullptr);
+  if (id == nullptr || id[0] == '\0') {
+    server.send(400, "text/plain", "missing id\n");
+    return;
+  }
+  const char* title  = doc["title"] | "許可しますか?";
+  const char* detail = doc["detail"] | "";
+
+  sleep_manager::notify_activity();
+  Serial.printf("[ask] id=%s detail=%s\n", id, detail);
+
+  // 発話は再生完了を待たない (待つと HTTP 応答が約 2 秒遅れてポーリングが詰まる)。
+  // avatar 停止前に再生を開始しておく (発話 → UI 表示の順)。
+  speakPhonemes(MSG_CONFIRM, false);
+
+  // ANSWERED (未回収の回答が残っている) 等で開けなかったら 409
+  if (!approval_ui::show(id, title, detail, millis())) {
+    server.send(409, "text/plain", "busy (approval pending)\n");
+    return;
+  }
+  server.send(200, "application/json", "{\"ok\":true}\n");
+}
+
+// GET /answer?id=... — 回答のショートポーリング先。必ず即返しする
+// (応答を保留すると loop() 全体が止まるため、ロングポーリングは不可)。
+void handleAnswer() {
+  if (!checkApprovalToken()) return;
+  if (!server.hasArg("id")) {
+    server.send(400, "text/plain", "missing id\n");
+    return;
+  }
+  approval_ui::Answer ans;
+  const approval_ui::Poll st = approval_ui::poll(server.arg("id").c_str(), ans);
+  switch (st) {
+    case approval_ui::Poll::kPending:
+      server.send(200, "application/json", "{\"state\":\"pending\"}\n");
+      break;
+    case approval_ui::Poll::kAnswered: {
+      const char* a = (ans == approval_ui::Answer::kAllow) ? "allow"
+                    : (ans == approval_ui::Answer::kDeny)  ? "deny"
+                                                           : "pc";
+      char buf[64];
+      snprintf(buf, sizeof(buf), "{\"state\":\"answered\",\"answer\":\"%s\"}\n", a);
+      server.send(200, "application/json", buf);
+      break;
+    }
+    default:  // kUnknown (id 不一致・タイムアウト済み) → Mac 側は PC フォールバック
+      server.send(404, "application/json", "{\"state\":\"unknown\"}\n");
+      break;
+  }
 }
 
 }  // namespace
@@ -294,6 +394,12 @@ void setup() {
   server.on("/",        HTTP_GET,  handleRoot);
   server.on("/healthz", HTTP_GET,  handleHealthz);
   server.on("/speak",   HTTP_POST, handleSpeak);
+  server.on("/ask",     HTTP_POST, handleAsk);
+  server.on("/answer",  HTTP_GET,  handleAnswer);
+  // WebServer は指定したヘッダしか保持しないため、トークン検証に使う
+  // X-Stackchan-Token を begin() の前に登録しておく必要がある。
+  const char* kCollectHeaders[] = {"X-Stackchan-Token"};
+  server.collectHeaders(kCollectHeaders, 1);
   server.begin();
   Serial.println("[http] server listening on :80");
 
@@ -304,16 +410,21 @@ void setup() {
   pet_reaction::init(avatar);
   // 音量を NVS から復元して M5.Speaker.setVolume() を適用 (avatar.init() の後)
   volume_control::init(avatar);
+  approval_ui::init(avatar);
 }
 
 void loop() {
   M5StackChan.update();
   server.handleClient();
   tickWifiWatch(millis());
-  volume_control::tick(millis());
+  approval_ui::tick(millis());
+  // 承認 UI 表示中の長押しで音量 UI が開くと描画が競合するためスキップする
+  if (!approval_ui::is_active()) {
+    volume_control::tick(millis());
+  }
   // UI 表示中は Avatar 描画タスクが止まっており、setExpression() を呼ぶ他モジュールを
   // 走らせると不正タスクハンドルに触れる。UI が閉じている間だけ tick する。
-  if (!volume_control::is_active()) {
+  if (!volume_control::is_active() && !approval_ui::is_active()) {
     // 起動時の IP 吹き出しを数秒で自動クリア (UI 表示中は Avatar タスクが止まっているので除外)
     if (s_ip_balloon_active && millis() - s_ip_shown_at_ms > kIpBalloonMs) {
       avatar.setSpeechText("");

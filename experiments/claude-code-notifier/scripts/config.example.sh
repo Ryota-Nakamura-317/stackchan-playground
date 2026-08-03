@@ -19,3 +19,17 @@ export STACKCHAN_HOST="stackchan.local"
 # 確認方法: 起動時シリアル出力、またはルータの DHCP クライアント一覧。
 #   export STACKCHAN_MAC="aa:bb:cc:dd:ee:ff"
 export STACKCHAN_MAC=""
+
+# 承認 API (/ask, /answer) の共有トークン。
+# firmware/include/secrets.h の STACKCHAN_TOKEN と同じ値を設定する。
+# 空のままだと ask_stackchan.sh は即 PC フォールバックする。
+# 生成例: openssl rand -hex 16
+export STACKCHAN_TOKEN=""
+
+# 「PCで確認」ボタンで最前面に出すアプリ。
+# ターミナルで Claude Code を使っているなら "Terminal" や "iTerm" に。
+export FOCUS_APP="Claude"
+
+# Stack-Chan での承認待ちの上限秒。
+# フックの timeout (推奨 75 秒) と画面の自動クローズ (60 秒) より短くすること。
+export ASK_TIMEOUT_SEC="55"

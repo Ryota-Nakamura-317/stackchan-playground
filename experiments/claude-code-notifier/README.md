@@ -43,22 +43,33 @@ ESP32 は同時に走るアプリが 1 つだけなので、**工場ファーム
 ```
 Claude Code (Mac)
   ├─ Stop hook         ─┐
-  └─ Notification hook ─┴─→ scripts/notify_stackchan.sh <event>
-                              ├─ stdin の hook JSON から message を抽出
-                              ├─ event / message → 発話 kind を決定
-                              ├─ IP を3層で解決 (すべて curl は --ipv4 付き)
-                              │    1. ~/.cache/stackchan/last_ip (前回成功 IP)
-                              │    2. mDNS: ping -c1 stackchan.local (~0.1 秒)
-                              │    3. ARP テーブルから STACKCHAN_MAC を検索
-                              ├─ 解決成功 → POST /speak (バックグラウンド) + IP をキャッシュ
-                              └─ 全滅 → 発話スキップ + rediscover_stackchan.sh を
-                                 デタッチ起動 (ping スイープ → ARP → キャッシュ自己修復)
+  ├─ Notification hook ─┴─→ scripts/notify_stackchan.sh <event>
+  │                           ├─ stdin の hook JSON から message を抽出
+  │                           ├─ event / message → 発話 kind を決定
+  │                           ├─ IP を3層で解決 (すべて curl は --ipv4 付き)
+  │                           │    1. ~/.cache/stackchan/last_ip (前回成功 IP)
+  │                           │    2. mDNS: ping -c1 stackchan.local (~0.1 秒)
+  │                           │    3. ARP テーブルから STACKCHAN_MAC を検索
+  │                           ├─ 解決成功 → POST /speak (バックグラウンド) + IP をキャッシュ
+  │                           └─ 全滅 → 発話スキップ + rediscover_stackchan.sh を
+  │                              デタッチ起動 (ping スイープ → ARP → キャッシュ自己修復)
+  └─ PermissionRequest hook ─→ scripts/ask_stackchan.sh
+                              ├─ hook JSON の tool_name / tool_input から質問文を組み立て
+                              ├─ IP 解決は notify 側と同じ3層機構を再利用
+                              ├─ POST /ask → Stack-Chan の画面に承認 UI を表示
+                              ├─ GET /answer を 0.5 秒間隔でポーリング
+                              └─ 回答に応じて decision (allow/deny) を stdout へ返す。
+                                 「PCで確認」・不達・タイムアウト時は PC プロンプトへフォールバック
+                                 (詳細は下記 **画面で承認する (approval UI)** を参照)
 
 Stack-Chan (CoreS3)
   ├─ Wi-Fi STA + mDNS (stackchan.local を公開)
   ├─ GET /healthz → 200 即返し
   ├─ POST /speak  → AquesTalk pico で PCM 合成 → M5.Speaker.playRaw() 出力
   │                 + Avatar 表情変化(発話中は idle motion 停止)
+  ├─ POST /ask    → 質問を保持して承認 UI を全画面表示 + 「きょかください」発話
+  │                 (X-Stackchan-Token ヘッダ必須。表示中の再要求は 409)
+  ├─ GET /answer  → {"state":"pending"} / {"state":"answered","answer":...} を即返し
   ├─ idle motion  → StackChan-BSP の Motion API でランダムに首を振る
   │                 (2〜5 秒間隔、yaw ±20° / pitch 35°±10°)
   └─ pet reaction → 頭頂部の前後スワイプ (BSP TouchSensor) で
@@ -110,6 +121,10 @@ cd experiments/claude-code-notifier
 cp firmware/include/secrets.example.h firmware/include/secrets.h
 # secrets.h を編集して WIFI_SSID / WIFI_PASS を埋める
 # AQUESTALK_LICENSE_KEY は評価版ならダミー値のままで OK
+# STACKCHAN_TOKEN は承認 UI (approval UI) 用の共有トークン。
+#   生成例: openssl rand -hex 16
+#   後述の config.local.sh の STACKCHAN_TOKEN と同じ値にする。
+#   空のままだと /ask /answer が 503 を返し、承認 UI 機能だけ無効になる
 ```
 
 `secrets.h` は `.gitignore` で除外されているのでコミットされません。
@@ -135,6 +150,12 @@ cp config.example.sh config.local.sh
 #   STACKCHAN_HOST … 既定の "stackchan.local" のままで OK (IP 直書きも可)
 #   STACKCHAN_MAC  … Stack-Chan の MAC アドレスを書く (ARP フォールバック用)。
 #                    起動時シリアル出力かルータの DHCP クライアント一覧で確認
+#   STACKCHAN_TOKEN … 承認 UI 用の共有トークン。secrets.h の STACKCHAN_TOKEN と
+#                    同じ値を書く (不一致だと 401 で常に PC フォールバック)
+#   FOCUS_APP      … 「PCで確認」ボタンで最前面に出すアプリ。既定 "Claude"。
+#                    ターミナルで Claude Code を使うなら "Terminal" や "iTerm"
+#   ASK_TIMEOUT_SEC … 承認 UI の回答待ち上限秒。既定 55 (画面の自動クローズ 60 秒より
+#                    短く保つ。詳細は 画面で承認する (approval UI) のチューニング参照)
 ```
 
 `config.local.sh` も `.gitignore` 対象です。IP は「キャッシュ → mDNS → ARP」で自動解決されるため、DHCP で変わっても書き換え不要です。
@@ -166,12 +187,24 @@ cp config.example.sh config.local.sh
           }
         ]
       }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/<your-user>/Workspace/dev/stackchan/experiments/claude-code-notifier/scripts/ask_stackchan.sh",
+            "timeout": 75
+          }
+        ]
+      }
     ]
   }
 }
 ```
 
 - スクリプトパスは **絶対パスで** 指定する必要があります(Claude Code は hook を任意の cwd で実行するため)。
+- `PermissionRequest` は承認 UI (approval UI) 用です。matcher を付けていないので全ツールの権限プロンプトが対象になります。承認 UI を使わない場合はこのブロックごと省略して OK。`timeout: 75` の意味は **画面で承認する (approval UI)** のチューニング参照。
 - リポジトリ内 `.claude/settings.local.json` にも hook を入れていると **二重発話** になります。グローバル設定に一本化したら、ローカル側は空にするか削除してください。
 
 ## 動作確認
@@ -204,6 +237,21 @@ curl -X POST http://$HOST/speak \
 curl -X POST http://$HOST/speak \
   -H 'Content-Type: application/json' \
   -d '{"mode":"free","text":"te'sutoda'yo."}'
+
+# 承認 UI (approval UI) の手動確認。TOKEN は secrets.h の STACKCHAN_TOKEN と同じ値
+TOKEN=<STACKCHAN_TOKEN の値>
+
+curl -X POST http://$HOST/ask \
+  -H 'Content-Type: application/json' \
+  -H "X-Stackchan-Token: $TOKEN" \
+  -d '{"id":"test-1","title":"許可しますか?","detail":"Bash: git push origin main"}'
+# → {"ok":true} で画面に [拒否] [PCで確認] [承認] の UI が出て「きょかください」と発話。
+#   表示中に再 POST すると 409 (busy)、トークン不一致は 401、ファーム側トークン未設定は 503
+
+# 画面のボタンを押してから回答を回収(取得は 1 回きり。10 秒間回収しないと破棄される)
+curl -H "X-Stackchan-Token: $TOKEN" "http://$HOST/answer?id=test-1"
+# → 未回答なら {"state":"pending"}、回答済みなら {"state":"answered","answer":"allow"} など。
+#   未知の id は 404 {"state":"unknown"}
 ```
 
 ### スクリプト単体テスト
@@ -344,6 +392,56 @@ BSP の `examples/Servo/HomeCalibration/HomeCalibration.ino` を一旦焼いて�
 | `kVolDefault` | 200 | NVS 未保存時の初期値 (旧ハードコード値と同じ) |
 | `kAutoCloseMs` | 8000 | 無操作で UI が自動的に閉じるまでの時間 (ms) |
 
+## 画面で承認する (approval UI)
+
+Claude Code の権限プロンプト(「このツールを実行していい?」)に、**Stack-Chan の画面タッチだけ** で答えられる機能。
+
+権限プロンプトが出る直前に `PermissionRequest` フック (`scripts/ask_stackchan.sh`) が発火し、
+Stack-Chan の画面に質問文と **[拒否] [PCで確認] [承認]** の 3 ボタンが全画面表示され、
+「kyo'ka kuda'sai.」(許可ください)と発話します。押したボタンに応じて decision (allow / deny) が
+Claude Code に返ります。**[PCで確認]** は `open -a` でアプリを最前面に出し、通常どおり
+PC 側のプロンプトで答える動作です。Stack-Chan 不達・タイムアウト・多重リクエスト時も
+すべて PC プロンプトにフォールバックするため、**最悪でも従来どおり PC で承認できます**(安全側に壊れる)。
+
+### 仕組み
+
+- フック: `PermissionRequest` は権限プロンプトが実際に表示されるときだけ発火。`ask_stackchan.sh` が
+  stdin の hook JSON から質問文を組み立てる(`Bash` → `command`、`Edit` / `Write` / `NotebookEdit` →
+  `file_path`、その他 → `tool_input` を 120 字に圧縮。全体 200 字上限)。`jq` 必須(無ければ即フォールバック)
+- 送信: `POST /ask {"id":"...","title":"許可しますか?","detail":"Bash: git push ..."}` → 200 `{"ok":true}`。
+  音量 UI・承認 UI の表示中や未回収の回答が残っている間は 409 (busy) で、スクリプトは即 PC フォールバック
+- 画面: 上部に title、中央に detail 最大 3 行(UTF-8 対応の折り返し + 省略)、下部に 3 ボタン。
+  誤タップ対策で [承認] は右端に配置。無操作 60 秒で自動クローズ
+- 回収: スクリプトが `GET /answer?id=...` を 0.5 秒間隔でポーリング → `{"state":"pending"}` /
+  `{"state":"answered","answer":"allow"|"deny"|"pc"}`(**取得は 1 回きり**。回答が 10 秒間
+  回収されないと破棄)。未知の id は 404 `{"state":"unknown"}`
+- 反映: `allow` / `deny` は decision JSON を stdout に出力して Claude Code に返す
+  (`notify_stackchan.sh` と違い **stdout に JSON を出すのが正常動作**)。`pc` は
+  `open -a "$FOCUS_APP"` を実行して何も出力せず終了 → 通常の PC プロンプトへ
+
+### セキュリティ
+
+`POST /ask` と `GET /answer` は **`X-Stackchan-Token` ヘッダ必須** です。firmware 側 `secrets.h` と
+Mac 側 `config.local.sh` の `STACKCHAN_TOKEN` に同じ値を設定してください(生成例:
+`openssl rand -hex 16`)。不一致は 401、ファーム側トークンが空なら 503 で機能自体が無効になります。
+
+> ⚠️ 通信は HTTP 平文で、家庭内 LAN 前提の割り切りです。トークンは「/ask /answer の承認操作を
+> 同一 LAN 内の第三者から守る」ためのもので、盗聴への耐性はありません。信頼できない LAN では
+> 使わないでください。
+
+### チューニング
+
+タイムアウトは **フック `timeout` (75 秒) > 画面の自動クローズ (60 秒) > ポーリング上限 (55 秒)**
+の関係を保つ設計です(内側から先に諦めることで、フックが必ず自力でフォールバックを完了できる)。
+変更するときもこの大小関係を崩さないこと。
+
+| 設定 | 場所 | 既定値 | 意味 |
+|---|---|---|---|
+| `kAutoCloseMs` | `firmware/src/approval_ui.cpp` | 60000 | 無操作で承認 UI が自動的に閉じるまでの時間 (ms) |
+| `ASK_TIMEOUT_SEC` | `scripts/config.local.sh` | 55 | スクリプトの回答待ち上限 (秒)。自動クローズより短く保つ |
+| `timeout` | `~/.claude/settings.json` の PermissionRequest hook | 75 | フック全体の打ち切り (秒)。ASK_TIMEOUT_SEC より長く保つ |
+| `FOCUS_APP` | `scripts/config.local.sh` | "Claude" | [PCで確認] で最前面に出すアプリ。ターミナル運用なら "Terminal" や "iTerm" |
+
 ## トラブルシュート
 
 | 症状 | 確認ポイント |
@@ -362,6 +460,9 @@ BSP の `examples/Servo/HomeCalibration/HomeCalibration.ino` を一旦焼いて�
 | 音は出るが「ヌヌヌ」 | 評価版の制限が出ている。固定文は kind ごとにナ行・マ行(N/M)を含まない設計なので発生しないはず。自由文(`mode:free`)で発生するなら製品版を購入 |
 | hook が動かない | `chmod +x scripts/notify_stackchan.sh scripts/rediscover_stackchan.sh` 済みか、`~/.claude/settings.json` の `command` が絶対パスか、`scripts/config.local.sh` の `STACKCHAN_MAC` が正しいか |
 | 二重に発話される | リポジトリ内 `.claude/settings.local.json` にも旧 hook が残っていないか確認 |
+| 承認 UI: 常に PC 側プロンプトになる | トークン不一致だと `/ask` が 401 になり常に PC フォールバック。`secrets.h` と `config.local.sh` の `STACKCHAN_TOKEN` が同じ値か確認 |
+| 承認 UI: 画面に何も出ない | ① `jq` がインストール済みか(無いと即フォールバック)② `~/.claude/settings.json` に `PermissionRequest` フックを登録済みか ③ IP 不達になっていないか(`tail /tmp/stackchan_notify.log`) |
+| `/ask` が 409 を返す | 音量 UI と承認 UI は同時使用不可(どちらかの表示中・未回収の回答がある間は busy)。画面が閉じてから再実行 |
 
 ## 発話文言を変えたい
 

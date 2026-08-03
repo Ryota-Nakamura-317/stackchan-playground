@@ -16,3 +16,10 @@
 // すべて「ヌ」になる制限があります。継続利用・商用利用には有償の製品版
 // ライセンスキーを購入してここに記入してください(購入方法は公式に問い合わせ)。
 #define AQUESTALK_LICENSE_KEY "XXX-XXX-XXX"
+
+// /ask /answer (Claude Code 承認 UI) 用の共有トークン。
+// 生成例: openssl rand -hex 16
+// Mac 側 scripts/config.local.sh の STACKCHAN_TOKEN と同じ値にすること。
+// 空文字列 "" のままにすると /ask /answer は 503 で無効化されます
+// (トークン未設定のまま承認機能を公開しないための安全弁)。
+#define STACKCHAN_TOKEN "change-me"
