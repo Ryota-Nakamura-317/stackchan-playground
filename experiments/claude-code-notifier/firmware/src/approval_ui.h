@@ -8,6 +8,8 @@
 // 流れ:
 //   - /ask ハンドラが show() を呼ぶと avatar を停止し、質問文と
 //     [拒否] [PCで確認] [承認] の 3 ボタンを全画面表示する (SHOWING)。
+//     ui="pc_only" のときは承認/拒否の2値で表現できない質問 (AskUserQuestion
+//     等) のため、ボタンを [PCで確認] 1つだけにする。
 //   - ボタンタップで回答を保持し、画面を閉じて顔へ復帰する (ANSWERED)。
 //     poll を待たずに閉じてよい設計 (回答は poll() が取りに来るまで保持)。
 //   - Mac 側フックスクリプトが /answer 経由で poll() を叩き、回答を 1 回
@@ -33,7 +35,10 @@ bool is_active();
 
 // /ask から呼ぶ。表示中 (または未回収の回答が残っている) なら false を返し、
 // 呼び出し元が 409 を返す約束。成功時は UI を開いて true。
-bool show(const char* id, const char* title, const char* detail, uint32_t now_ms);
+// ui: "pc_only" のときはボタンを「PCで確認」1つだけにする (承認/拒否の2値で
+// 表現できない質問向け)。それ以外・nullptr・空文字は従来の3ボタン。
+bool show(const char* id, const char* title, const char* detail, const char* ui,
+          uint32_t now_ms);
 
 // /answer から呼ぶ。id 不一致・保持なしは kUnknown。
 enum class Poll : uint8_t { kUnknown, kPending, kAnswered };

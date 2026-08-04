@@ -309,6 +309,7 @@ void handleAsk() {
   }
   const char* title  = doc["title"] | "許可しますか?";
   const char* detail = doc["detail"] | "";
+  const char* ui     = doc["ui"] | "";  // "pc_only" ならボタン1つだけの UI にする
 
   sleep_manager::notify_activity();
   Serial.printf("[ask] id=%s detail=%s\n", id, detail);
@@ -318,7 +319,7 @@ void handleAsk() {
   speakPhonemes(MSG_CONFIRM, false);
 
   // ANSWERED (未回収の回答が残っている) 等で開けなかったら 409
-  if (!approval_ui::show(id, title, detail, millis())) {
+  if (!approval_ui::show(id, title, detail, ui, millis())) {
     server.send(409, "text/plain", "busy (approval pending)\n");
     return;
   }

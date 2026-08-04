@@ -407,7 +407,8 @@ PC 側のプロンプトで答える動作です。Stack-Chan 不達・タイム
 
 - フック: `PermissionRequest` は権限プロンプトが実際に表示されるときだけ発火。`ask_stackchan.sh` が
   stdin の hook JSON から質問文を組み立てる(`Bash` → `command`、`Edit` / `Write` / `NotebookEdit` →
-  `file_path`、その他 → `tool_input` を 120 字に圧縮。全体 200 字上限)。`jq` 必須(無ければ即フォールバック)
+  `file_path`、`AskUserQuestion` → **pc_only モード**(下記参照)、その他 → `tool_input` を 120 字に
+  圧縮。全体 200 字上限)。`jq` 必須(無ければ即フォールバック)
 - 送信: `POST /ask {"id":"...","title":"許可しますか?","detail":"Bash: git push ..."}` → 200 `{"ok":true}`。
   音量 UI・承認 UI の表示中や未回収の回答が残っている間は 409 (busy) で、スクリプトは即 PC フォールバック
 - 画面: 上部に title、中央に detail 最大 3 行(UTF-8 対応の折り返し + 省略)、下部に 3 ボタン。
@@ -418,6 +419,22 @@ PC 側のプロンプトで答える動作です。Stack-Chan 不達・タイム
 - 反映: `allow` / `deny` は decision JSON を stdout に出力して Claude Code に返す
   (`notify_stackchan.sh` と違い **stdout に JSON を出すのが正常動作**)。`pc` は
   `open -a "$FOCUS_APP"` を実行して何も出力せず終了 → 通常の PC プロンプトへ
+
+### pc_only モード (AskUserQuestion 等)
+
+承認/却下の2値で表現できない質問(`AskUserQuestion` ツールなど)に固定の3ボタンを出すと
+誤解を招くため、こうしたケースは画面に依頼内容だけ表示し、押せるボタンを **[PCで確認]** 1つに
+絞る。動作は既存の pc 経路そのもの(タップで Mac 側の Claude アプリを最前面に出す)で、
+`/answer` が返す `answer` は常に `"pc"`。
+
+- `ask_stackchan.sh` は `tool_name` が `AskUserQuestion` のとき、title を「PCで回答してください」、
+  detail を `tool_input.questions[0].question`(取れなければ従来の compact JSON 先頭120字)にし、
+  `POST /ask` のペイロードに `"ui":"pc_only"` を追加する。それ以外のツールは `ui` フィールド自体を送らない
+- ファーム側 `handleAsk`(`firmware/src/main.cpp`)が `ui` を読み取り `approval_ui::show()` に渡す。
+  `approval_ui`(`firmware/src/approval_ui.cpp`)は `ui == "pc_only"` のときボタンを [PCで確認] 1つ
+  だけ描画(画面下部中央、幅広)し、タップ判定もそのボタンのみ。回答保持・自動クローズ・409 などの
+  挙動は通常モードと共通
+- `ui` を省略、または `"pc_only"` 以外の値のときは従来どおり3ボタン表示
 
 ### セキュリティ
 

@@ -34,6 +34,9 @@ constexpr int kDetailMaxLines = 3;
 constexpr int kBtnY = 162, kBtnH = 56, kBtnW = 96;
 // 誤タップ対策で承認は右端に置く (拒否と物理的に離す)
 constexpr int kDenyX = 8, kPcX = 112, kAllowX = 216;
+// pc_only モード (ボタン1つだけ) 用。y/h は既存の kBtnY/kBtnH を流用し、
+// 幅広で画面下部中央に置く。
+constexpr int kPcOnlyX = 60, kPcOnlyW = 200;
 
 // SHOWING 中の無操作でここまで待って自動クローズ (Mac 側は PC フォールバック)
 constexpr uint32_t kAutoCloseMs = 60000;
@@ -51,6 +54,7 @@ State    s_state          = State::IDLE;
 char     s_id[64]         = "";
 char     s_title[64]      = "";
 char     s_detail[256]    = "";
+bool     s_pc_only        = false;  // true: ボタンは [PCで確認] 1つだけ
 Answer   s_answer         = Answer::kPc;
 uint32_t s_last_touch_ms  = 0;
 uint32_t s_answered_at_ms = 0;
@@ -136,14 +140,14 @@ void draw_detail() {
   }
 }
 
-void draw_button(int x, const char* label, uint16_t fill_c) {
+void draw_button(int x, const char* label, uint16_t fill_c, int w = kBtnW) {
   auto& d = M5.Display;
   const uint16_t white = d.color565(235, 240, 245);
-  d.fillRoundRect(x, kBtnY, kBtnW, kBtnH, 10, fill_c);
+  d.fillRoundRect(x, kBtnY, w, kBtnH, 10, fill_c);
   d.setTextColor(white, fill_c);
   d.setTextSize(1);
   d.setTextDatum(textdatum_t::middle_center);
-  d.drawString(label, x + kBtnW / 2, kBtnY + kBtnH / 2);
+  d.drawString(label, x + w / 2, kBtnY + kBtnH / 2);
 }
 
 void draw_ui() {
@@ -169,10 +173,14 @@ void draw_ui() {
   d.setTextDatum(textdatum_t::top_left);
   draw_detail();
 
-  // 下部: 3 ボタン。承認は右端 (誤タップ対策)
-  draw_button(kDenyX,  "拒否",     red);
-  draw_button(kPcX,    "PCで確認", gray);
-  draw_button(kAllowX, "承認",     green);
+  // 下部: pc_only モードは [PCで確認] 1つだけ、通常は 3 ボタン (承認は右端、誤タップ対策)
+  if (s_pc_only) {
+    draw_button(kPcOnlyX, "PCで確認", gray, kPcOnlyW);
+  } else {
+    draw_button(kDenyX,  "拒否",     red);
+    draw_button(kPcX,    "PCで確認", gray);
+    draw_button(kAllowX, "承認",     green);
+  }
 }
 
 // 画面を閉じて顔へ復帰する。状態遷移は呼び出し元で行う。
@@ -186,11 +194,18 @@ void close_ui() {
 
 void handle_tap(uint32_t now_ms, int x, int y) {
   int         btn_x;
+  int         btn_w = kBtnW;
   const char* label;
   uint16_t    hi_c;
   Answer      ans;
   auto& d = M5.Display;
-  if (in_rect(x, y, kDenyX, kBtnY, kBtnW, kBtnH)) {
+  if (s_pc_only) {
+    if (!in_rect(x, y, kPcOnlyX, kBtnY, kPcOnlyW, kBtnH)) {
+      return;  // ボタン外タップは無視 (自動クローズの延長のみ)
+    }
+    btn_x = kPcOnlyX; btn_w = kPcOnlyW; label = "PCで確認";
+    hi_c  = d.color565(120, 140, 180); ans = Answer::kPc;
+  } else if (in_rect(x, y, kDenyX, kBtnY, kBtnW, kBtnH)) {
     btn_x = kDenyX;  label = "拒否";     hi_c = d.color565(230, 120, 110); ans = Answer::kDeny;
   } else if (in_rect(x, y, kPcX, kBtnY, kBtnW, kBtnH)) {
     btn_x = kPcX;    label = "PCで確認"; hi_c = d.color565(120, 140, 180); ans = Answer::kPc;
@@ -200,7 +215,7 @@ void handle_tap(uint32_t now_ms, int x, int y) {
     return;  // ボタン外タップは無視 (自動クローズの延長のみ)
   }
   // 押したボタンをハイライトして視覚フィードバックしてから閉じる
-  draw_button(btn_x, label, hi_c);
+  draw_button(btn_x, label, hi_c, btn_w);
   delay(kTapFeedbackMs);
   s_answer         = ans;
   s_answered_at_ms = now_ms;
@@ -253,7 +268,8 @@ void tick(uint32_t now_ms) {
 
 bool is_active() { return s_state == State::SHOWING; }
 
-bool show(const char* id, const char* title, const char* detail, uint32_t now_ms) {
+bool show(const char* id, const char* title, const char* detail, const char* ui,
+          uint32_t now_ms) {
   // v1 は 1 件のみ保持。表示中 or 未回収の回答が残っている間は受けない
   // (呼び出し元が 409 を返し、Mac 側は PC フォールバックする)。
   if (s_state != State::IDLE) return false;
@@ -261,6 +277,7 @@ bool show(const char* id, const char* title, const char* detail, uint32_t now_ms
   snprintf(s_id,     sizeof(s_id),     "%s", id);
   snprintf(s_title,  sizeof(s_title),  "%s", (title && title[0]) ? title : "許可しますか?");
   snprintf(s_detail, sizeof(s_detail), "%s", detail ? detail : "");
+  s_pc_only = (ui != nullptr) && (strcmp(ui, "pc_only") == 0);
 
   s_avatar->stop();
   delay(kDrawDrainMs);  // 残フレームが M5.Display を触り終えるのを待つ

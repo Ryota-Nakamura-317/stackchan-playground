@@ -57,12 +57,24 @@ ASK_ID="${TOOL_USE_ID:-$$-$(date +%s)}"
 
 # 質問文の組み立て。title は固定、detail はツールごとに要点だけ抜く
 TITLE="許可しますか?"
+UI=""
 case "${TOOL_NAME}" in
   Bash)
     DETAIL="Bash: $(printf '%s' "${STDIN_JSON}" | jq -r '.tool_input.command // empty' 2>/dev/null)"
     ;;
   Edit|Write|NotebookEdit)
     DETAIL="${TOOL_NAME}: $(printf '%s' "${STDIN_JSON}" | jq -r '.tool_input.file_path // empty' 2>/dev/null)"
+    ;;
+  AskUserQuestion)
+    # 承認/却下の2値で表現できない質問なので、画面には内容だけ見せて
+    # ボタンは「PCで確認」1つにする(タップで PC 側の Claude を前面に出す既存経路)。
+    TITLE="PCで回答してください"
+    UI="pc_only"
+    DETAIL="$(printf '%s' "${STDIN_JSON}" | jq -r '.tool_input.questions[0].question // empty' 2>/dev/null)"
+    if [[ -z "${DETAIL}" ]]; then
+      compact="$(printf '%s' "${STDIN_JSON}" | jq -c '.tool_input // {}' 2>/dev/null)"
+      DETAIL="${TOOL_NAME:-unknown}: ${compact:0:120}"
+    fi
     ;;
   *)
     compact="$(printf '%s' "${STDIN_JSON}" | jq -c '.tool_input // {}' 2>/dev/null)"
@@ -84,9 +96,10 @@ fi
 ip="${resolved%% *}"
 mkdir -p "${CACHE_DIR}" && printf '%s\n' "${ip}" > "${CACHE_FILE}"
 
-# POST /ask で質問を表示させる (jq で JSON エスケープを任せる)
-BODY="$(jq -cn --arg id "${ASK_ID}" --arg title "${TITLE}" --arg detail "${DETAIL}" \
-  '{id: $id, title: $title, detail: $detail}')"
+# POST /ask で質問を表示させる (jq で JSON エスケープを任せる)。
+# ui は pc_only のときだけフィールドを含める (空文字なら省略し、従来どおり3ボタン)。
+BODY="$(jq -cn --arg id "${ASK_ID}" --arg title "${TITLE}" --arg detail "${DETAIL}" --arg ui "${UI}" \
+  '{id: $id, title: $title, detail: $detail} + (if $ui != "" then {ui: $ui} else {} end)')"
 http_code="$(curl -sS --ipv4 --max-time 5 -o /dev/null -w '%{http_code}' \
   -X POST "http://${ip}/ask" \
   -H "Content-Type: application/json" \

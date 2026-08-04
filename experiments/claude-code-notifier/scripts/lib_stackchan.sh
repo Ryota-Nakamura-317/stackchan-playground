@@ -75,7 +75,7 @@ ping_resolve() {
     sed -n 's/^PING [^ ]* (\([0-9.][0-9.]*\)).*/\1/p' | head -1
 }
 
-# 3層で IP を解決する。stdout に「IP 経路名」を出す (例: "192.168.0.15 cache")。
+# 3層で IP を解決する。stdout に「IP 経路名」を出す (例: "192.168.x.y cache")。
 # 一度 probe に失敗した IP は後段レイヤで再 probe しない (各層が同じ IP に
 # 解決されると probe タイムアウトが積み重なるため)。
 resolve_ip() {
